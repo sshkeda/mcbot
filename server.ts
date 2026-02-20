@@ -2,6 +2,8 @@ import { createServer } from "node:http";
 import { createRequire } from "node:module";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 const execFileAsync = promisify(execFile);
 const require = createRequire(import.meta.url);
@@ -10,15 +12,16 @@ const pathfinder = require("mineflayer-pathfinder");
 const { GoalNear, GoalFollow } = pathfinder.goals;
 const Vec3 = require("vec3").Vec3;
 const sharp = require("sharp");
-import { chopNearestTree } from "./skills/chop";
-import { pickupItems } from "./skills/pickup";
-import { mineBlocks } from "./skills/mine";
-import { craftItem } from "./skills/craft";
-import { placeBlock, resolveRelativePos } from "./skills/build";
-import { fightMobs } from "./skills/fight";
-import { farmCrops } from "./skills/farm";
-import { smeltItem, getSmeltOutput } from "./skills/smelt";
+import { chopNearestTree } from "./tools/chop";
+import { pickupItems } from "./tools/pickup";
+import { mineBlocks } from "./tools/mine";
+import { craftItem } from "./tools/craft";
+import { placeBlock, resolveRelativePos } from "./tools/build";
+import { fightMobs } from "./tools/fight";
+import { farmCrops } from "./tools/farm";
+import { smeltItem, getSmeltOutput } from "./tools/smelt";
 import { withTimeout } from "./lib/utils";
+import { vanillaMeleeAttack } from "./lib/combat";
 import {
   findByTool,
   formatCommandError,
@@ -28,6 +31,18 @@ import {
   type CommandSpec,
 } from "./lib/commands";
 
+interface ChatMessage {
+  sender: string;
+  message: string;
+  ts: string;
+}
+
+interface Directive {
+  text: string;
+  ts: string;
+  interrupt?: boolean;
+}
+
 interface BotInstance {
   bot: any;
   mcData: any;
@@ -35,9 +50,57 @@ interface BotInstance {
   host: string;
   port: number;
   version: string;
+  chatInbox: ChatMessage[];
+  directives: Directive[];
+}
+
+// ── Activity log ────────────────────────────────────────────────────
+interface LogEntry {
+  ts: string;
+  bot: string;
+  command: string;
+  params: Record<string, string>;
+  ok: boolean;
+  summary: string;
+  durationMs: number;
+}
+
+const LOG_MAX = 500;
+const activityLog: LogEntry[] = [];
+const LOG_DIR = process.env.MCBOT_LOG_DIR || "/tmp";
+const LOG_FILE = `${LOG_DIR}/mcbot-activity.log`;
+
+function logActivity(entry: LogEntry) {
+  activityLog.push(entry);
+  if (activityLog.length > LOG_MAX) activityLog.shift();
+  const line = `${entry.ts} [${entry.bot.padEnd(12)}] ${entry.ok ? "OK" : "ERR"} ${entry.command}${Object.keys(entry.params).length ? " " + JSON.stringify(entry.params) : ""} (${entry.durationMs}ms) ${entry.summary}\n`;
+  try { appendFileSync(LOG_FILE, line); } catch {}
+}
+
+function summarizeResult(command: string, data: any): string {
+  if (!data) return "";
+  if (data.error) return `error: ${data.error}`;
+  if (command === "spawn") return `spawned at ${data.x} ${data.y} ${data.z}`;
+  if (command === "status") return `hp:${data.health} food:${data.food} pos:${data.position?.x},${data.position?.y},${data.position?.z}`;
+  if (command === "chop") return `chopped ${data.chopped} logs`;
+  if (command === "mine") return `mined ${data.mined} blocks`;
+  if (command === "craft") return data.error ? `failed: ${data.error}` : `crafted ${data.item} x${data.crafted}`;
+  if (command === "smelt") return data.error ? `failed: ${data.error}` : `smelted ${data.item} x${data.smelted}`;
+  if (command === "fight") return `killed ${data.killed} mobs`;
+  if (command === "pickup") return `collected ${data.collected} items`;
+  if (command === "farm") return `harvested ${data.harvested}, replanted ${data.replanted}`;
+  if (command === "goto") return data.status || "";
+  if (command === "place") return data.placed ? `placed ${data.block}` : `failed: ${data.error}`;
+  if (command === "kill" || command === "killall") return data.status;
+  if (command === "list") return `${data.bots?.length || 0} bots`;
+  if (command === "screenshot") return data.file || `${data.size || 0}x${data.size || 0} context`;
+  if (command === "pov" || command === "render") return data.file || "";
+  return data.status || data.message || "";
 }
 
 const bots = new Map<string, BotInstance>();
+const connecting = new Set<string>(); // bots currently connecting
+const lastCommandAt = new Map<string, number>(); // track last command time per bot
 const PORT = Number(process.env.MCBOT_API_PORT) || 3847;
 
 const PREFERRED_INGREDIENTS = new Set([
@@ -47,6 +110,22 @@ const PREFERRED_INGREDIENTS = new Set([
   "string", "redstone", "lapis_lazuli", "coal", "flint",
   "leather", "paper", "feather",
 ]);
+
+const PROFILES_DIR = join(import.meta.dirname, "mcbots");
+const TEMPLATE_DIR = join(PROFILES_DIR, "_template");
+
+function ensureProfile(name: string) {
+  const profileDir = join(PROFILES_DIR, name);
+  if (existsSync(profileDir)) return;
+  if (!existsSync(TEMPLATE_DIR)) return;
+  mkdirSync(profileDir, { recursive: true });
+  const soulTemplate = readFileSync(join(TEMPLATE_DIR, "SOUL.md"), "utf-8");
+  writeFileSync(join(profileDir, "SOUL.md"), soulTemplate.replace(/\{\{NAME\}\}/g, name));
+  const metaTemplate = JSON.parse(readFileSync(join(TEMPLATE_DIR, "metadata.json"), "utf-8"));
+  metaTemplate.createdAt = new Date().toISOString();
+  writeFileSync(join(profileDir, "metadata.json"), JSON.stringify(metaTemplate, null, 2) + "\n");
+  console.log(`[mcbot] Created profile: ${profileDir}`);
+}
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url!, `http://localhost:${PORT}`);
@@ -63,21 +142,52 @@ const server = createServer(async (req, res) => {
     const first = parts[0];
     if (!first) throw new Error("use /<command> or /<botName>/<command>");
 
+    const t0 = Date.now();
     const fleetCommand = parts.length === 1 ? resolveCommand("fleet", first) : undefined;
     if (fleetCommand) {
+      // logs endpoint — return activity log directly
+      if (fleetCommand.name === "logs") {
+        const botFilter = params.bot;
+        const count = Math.min(Number(params.count) || 50, LOG_MAX);
+        let entries = botFilter
+          ? activityLog.filter(e => e.bot === botFilter)
+          : activityLog;
+        entries = entries.slice(-count);
+        json({ entries, file: LOG_FILE });
+        return;
+      }
       const validationError = validateParams(fleetCommand, params);
       if (validationError) throw new Error(validationError);
       result = await runFleetCommand(fleetCommand, params);
+      logActivity({
+        ts: new Date().toISOString(),
+        bot: params.name || "*",
+        command: fleetCommand.name,
+        params,
+        ok: true,
+        summary: summarizeResult(fleetCommand.name, result),
+        durationMs: Date.now() - t0,
+      });
     } else {
       const botName = first;
       const cmd = parts[1] || "status";
       const instance = bots.get(botName);
-      if (!instance) throw new Error(`no bot named "${botName}". spawned: [${[...bots.keys()].join(", ")}]`);
+      if (!instance) throw new Error(`bot "${botName}" not found (disconnected or never spawned). active bots: [${[...bots.keys()].join(", ") || "none"}]`);
       const botCommand = resolveCommand("bot", cmd);
       if (!botCommand) throw new Error(formatCommandError("bot", cmd));
       const validationError = validateParams(botCommand, params);
       if (validationError) throw new Error(validationError);
       result = await runBotCommand(instance, botCommand, params);
+      lastCommandAt.set(botName, Date.now());
+      logActivity({
+        ts: new Date().toISOString(),
+        bot: botName,
+        command: botCommand.name,
+        params,
+        ok: true,
+        summary: summarizeResult(botCommand.name, result),
+        durationMs: Date.now() - t0,
+      });
     }
 
     json(result);
@@ -95,31 +205,103 @@ server.listen(PORT, () => {
 
 function spawnBot(name: string, params: any): Promise<any> {
   return new Promise((resolve, reject) => {
-    if (bots.has(name)) return reject(new Error(`bot "${name}" already exists`));
+    if (bots.has(name) || connecting.has(name)) return reject(new Error(`bot "${name}" already exists`));
 
+    connecting.add(name);
     const opts = {
       host: params.host || "localhost",
       port: Number(params.port) || 25565,
       username: name,
-      version: params.version || "1.21.4",
+      version: params.version || "1.21.11",
     };
 
     const bot = mineflayer.createBot(opts);
     bot.loadPlugin(pathfinder.pathfinder);
+    let knockbackUntil = 0;
+    let pausedForKnockback = false;
+
+    const releaseMovementControls = () => {
+      for (const key of ["forward", "back", "left", "right", "jump", "sprint", "sneak"]) {
+        bot.setControlState(key as any, false);
+      }
+    };
+
+    const applyKnockbackWindow = (ms = 325) => {
+      knockbackUntil = Math.max(knockbackUntil, Date.now() + ms);
+      if (!pausedForKnockback) {
+        pausedForKnockback = true;
+        bot.pathfinder.stop();
+      }
+      releaseMovementControls();
+    };
 
     bot.once("spawn", () => {
+      connecting.delete(name);
       const mcData = require("minecraft-data")(bot.version);
-      bot.pathfinder.setMovements(new pathfinder.Movements(bot, mcData));
-      const instance: BotInstance = { bot, mcData, name, host: opts.host, port: opts.port, version: bot.version };
+      const movements = new pathfinder.Movements(bot, mcData);
+      movements.allow1by1towers = true;   // pillar up to escape holes
+      movements.allowParkour = true;
+      movements.canDig = true;
+      movements.scafoldingBlocks = [mcData.blocksByName.dirt?.id, mcData.blocksByName.cobblestone?.id, mcData.blocksByName.oak_planks?.id].filter(Boolean);
+      bot.pathfinder.setMovements(movements);
+
+      // Wrap goto to clear stale stopPathing flag from previous failed navigations.
+      // mineflayer-pathfinder bug: calling bot.pathfinder.stop() sets stopPathing=true
+      // but it only gets cleared when the physics loop runs. If goto() is called before
+      // the next tick, it immediately fails. We use a patched resetStopFlag() to clear it.
+      const _origGoto = bot.pathfinder.goto.bind(bot.pathfinder);
+      bot.pathfinder.goto = (goal: any) => {
+        bot.pathfinder.resetStopFlag();
+        return _origGoto(goal);
+      };
+
+      const instance: BotInstance = { bot, mcData, name, host: opts.host, port: opts.port, version: bot.version, chatInbox: [], directives: [] };
       bots.set(name, instance);
+
+      bot.on("chat", (username: string, message: string) => {
+        if (username === name) return; // ignore self
+        if (!username || username === "" || message.startsWith("[Server]")) return; // ignore server messages
+        instance.chatInbox.push({ sender: username, message, ts: new Date().toISOString() });
+        if (instance.chatInbox.length > 100) instance.chatInbox.shift();
+      });
+
+      // Keep bot knockback native-like by letting server velocity move it before resuming path input.
+      bot.on("entityHurt", (entity: any) => {
+        if (entity === bot.entity || entity?.id === bot.entity?.id) applyKnockbackWindow(350);
+      });
+      bot.on("physicsTick", () => {
+        if (Date.now() < knockbackUntil) {
+          releaseMovementControls();
+          return;
+        }
+        pausedForKnockback = false;
+      });
+      bot._client?.on?.("entity_velocity", (packet: any) => {
+        if (packet?.entityId === bot.entity?.id) applyKnockbackWindow(350);
+      });
+
+      try { ensureProfile(name); } catch {}
       console.log(`[mcbot] Spawned "${name}" on ${opts.host}:${opts.port} (${bot.version})`);
       resolve({ status: "spawned", name, ...posOf(bot) });
     });
 
-    bot.once("error", (err: Error) => reject(err));
+    bot.once("error", (err: Error) => {
+      connecting.delete(name);
+      reject(err);
+    });
 
     bot.on("kicked", (reason: string) => {
+      connecting.delete(name);
       console.log(`[mcbot] "${name}" kicked: ${reason}`);
+      logActivity({ ts: new Date().toISOString(), bot: name, command: "disconnect", params: { reason: "kicked" }, ok: false, summary: `kicked: ${reason}`, durationMs: 0 });
+      bots.delete(name);
+    });
+
+    bot.on("end", (reason: string) => {
+      connecting.delete(name);
+      if (!bots.has(name)) return; // already cleaned up by kicked handler
+      console.log(`[mcbot] "${name}" disconnected: ${reason || "unknown"}`);
+      logActivity({ ts: new Date().toISOString(), bot: name, command: "disconnect", params: { reason: reason || "connection lost" }, ok: false, summary: `disconnected: ${reason || "connection lost"}`, durationMs: 0 });
       bots.delete(name);
     });
 
@@ -130,9 +312,14 @@ function spawnBot(name: string, params: any): Promise<any> {
 function listBots() {
   const entries = [...bots.entries()].map(([name, inst]) => ({
     name,
+    status: "ready" as string,
     position: posOf(inst.bot),
     health: inst.bot.health,
+    lastCommandAt: lastCommandAt.get(name) || null,
   }));
+  for (const name of connecting) {
+    entries.push({ name, status: "connecting", position: { x: 0, y: 0, z: 0 }, health: 0, lastCommandAt: null });
+  }
   return { bots: entries };
 }
 
@@ -172,11 +359,27 @@ function listToolCatalog(scope?: string) {
 }
 
 async function runFleetCommand(spec: CommandSpec, params: Record<string, string>): Promise<any> {
-  if (spec.name === "spawn") return spawnBot(params.name!, params);
+  if (spec.name === "spawn") {
+    const names = params.name!.split(",").map(n => n.trim()).filter(Boolean);
+    if (names.length === 0) throw new Error("need name param");
+    if (names.length === 1) return spawnBot(names[0]!, params);
+    // Batch spawn: connect all concurrently
+    const results = await Promise.allSettled(names.map(n => spawnBot(n, params)));
+    const spawned: any[] = [];
+    const errors: any[] = [];
+    for (const [i, r] of results.entries()) {
+      if (r.status === "fulfilled") {
+        spawned.push(r.value);
+      } else {
+        errors.push({ name: names[i]!, error: r.reason?.message || String(r.reason) });
+      }
+    }
+    return { status: "batch", spawned, errors, total: names.length };
+  }
   if (spec.name === "list") return listBots();
   if (spec.name === "kill") return killBot(params.name!);
   if (spec.name === "killall") return killAllBots();
-  if (spec.name === "ping") return { status: "ok", bots: [...bots.keys()] };
+  if (spec.name === "ping") return { status: "ok", bots: [...bots.keys()], connecting: [...connecting] };
   if (spec.name === "camera") {
     const name = params.name!;
     const { x, y, z } = params;
@@ -188,6 +391,34 @@ async function runFleetCommand(spec: CommandSpec, params: Record<string, string>
       await new Promise((r) => setTimeout(r, 1000));
       result = { status: "camera placed", name, position: posOf(inst.bot) };
     }
+    return result;
+  }
+  if (spec.name === "profile") {
+    const name = params.name;
+    if (!name) throw new Error("need name param");
+    const profileDir = join(PROFILES_DIR, name);
+    const soulPath = join(profileDir, "SOUL.md");
+    const metaPath = join(profileDir, "metadata.json");
+
+    if (params.init === "true") {
+      if (existsSync(profileDir)) throw new Error(`profile already exists: ${profileDir}`);
+      ensureProfile(name);
+      return { status: "created", path: profileDir };
+    }
+
+    if (params.memory) {
+      if (!existsSync(metaPath)) throw new Error(`no profile for "${name}". create with --init`);
+      const meta = JSON.parse(readFileSync(metaPath, "utf-8"));
+      if (!Array.isArray(meta.memories)) meta.memories = [];
+      meta.memories.push(params.memory);
+      writeFileSync(metaPath, JSON.stringify(meta, null, 2) + "\n");
+      return { status: "memory added", total: meta.memories.length };
+    }
+
+    if (!existsSync(profileDir)) return { exists: false, name };
+    const result: any = { exists: true, name };
+    if (existsSync(soulPath)) result.soul = readFileSync(soulPath, "utf-8");
+    if (existsSync(metaPath)) result.metadata = JSON.parse(readFileSync(metaPath, "utf-8"));
     return result;
   }
   if (spec.name === "tools") return listToolCatalog(params.scope);
@@ -357,11 +588,20 @@ async function handleCommand(instance: BotInstance, cmd: string, params: any): P
   if (cmd === "goto") {
     const { x, y, z } = params;
     if (!x || !y || !z) return { error: "need x, y, z params" };
+    const goal = new GoalNear(Number(x), Number(y), Number(z), 2);
+    const pathListener = (results: any) => {
+      console.log(`[GOTO-DEBUG] path_update: status=${results.status} pathLen=${results.path?.length}`);
+    };
+    bot.on("path_update", pathListener);
     try {
-      await withTimeout(bot.pathfinder.goto(new GoalNear(Number(x), Number(y), Number(z), 2)), 30000);
+      console.log(`[GOTO-DEBUG] starting goto to ${x},${y},${z}`);
+      await withTimeout(bot.pathfinder.goto(goal), 30000);
     } catch (err: any) {
+      console.log(`[GOTO-DEBUG] error: ${err.name}: ${err.message}`);
       bot.pathfinder.stop();
       return { error: `navigation failed: ${err.message}`, position: posOf(bot) };
+    } finally {
+      bot.removeListener("path_update", pathListener);
     }
     return { status: "arrived", position: posOf(bot) };
   }
@@ -376,16 +616,29 @@ async function handleCommand(instance: BotInstance, cmd: string, params: any): P
     return { status: "stopped" };
   }
   if (cmd === "chat") {
-    bot.chat(params.message || "");
+    const msg = (params.message || "").replace(/\\([!@#$?])/g, "$1");
+    bot.chat(msg);
     return { status: "sent" };
   }
   if (cmd === "attack") {
+    const targetName = params.target;
     const entities = Object.values(bot.entities) as any[];
+    if (targetName) {
+      // PvP: attack a specific player by name
+      const player = entities
+        .filter((e: any) => e.type === "player" && e.username?.toLowerCase() === targetName.toLowerCase())
+        .sort((a: any, b: any) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0];
+      if (!player) return { error: `player ${targetName} not found nearby` };
+      const dist = player.position.distanceTo(bot.entity.position);
+      if (dist > 3.6) return { error: `${targetName} is ${dist.toFixed(1)}m away, need to be within 3.6 blocks` };
+      await vanillaMeleeAttack(bot, player);
+      return { status: `attacked player ${player.username} (${dist.toFixed(1)}m)` };
+    }
     const hostile = entities
       .filter((e: any) => e.type === "hostile" && e.position.distanceTo(bot.entity.position) < 5)
       .sort((a: any, b: any) => a.position.distanceTo(bot.entity.position) - b.position.distanceTo(bot.entity.position))[0];
     if (!hostile) return { error: "no hostile mobs within 5 blocks" };
-    await bot.attack(hostile);
+    await vanillaMeleeAttack(bot, hostile);
     return { status: `attacked ${hostile.name}` };
   }
   if (cmd === "dig") {
@@ -438,8 +691,24 @@ async function handleCommand(instance: BotInstance, cmd: string, params: any): P
       if (block) oreCounts[block.name] = (oreCounts[block.name] || 0) + 1;
     }
 
-    // Count nearby entities
+    // Nearest positions
     const p = bot.entity.position;
+    const nearest = (positions: any[]) => {
+      if (positions.length === 0) return null;
+      const sorted = positions.sort((a: any, b: any) => a.distanceTo(p) - b.distanceTo(p));
+      const pos = sorted[0];
+      return { x: pos.x, y: pos.y, z: pos.z };
+    };
+
+    const nearestOre: Record<string, { x: number; y: number; z: number }> = {};
+    for (const pos of ores) {
+      const block = bot.blockAt(pos);
+      if (block && !nearestOre[block.name]) {
+        nearestOre[block.name] = { x: pos.x, y: pos.y, z: pos.z };
+      }
+    }
+
+    // Count nearby entities
     const entities = Object.values(bot.entities) as any[];
     const nearby = entities.filter((e: any) => e !== bot.entity && e.position.distanceTo(p) < radius);
     const players = nearby.filter((e: any) => e.type === "player").map((e: any) => e.username || e.name);
@@ -450,8 +719,43 @@ async function handleCommand(instance: BotInstance, cmd: string, params: any): P
       position: posOf(bot),
       radius,
       blocks: { logs: logs.length, water: water.length, lava: lava.length, ores: oreCounts },
+      nearest: {
+        log: nearest(logs),
+        water: nearest(water),
+        lava: nearest(lava),
+        ores: nearestOre,
+      },
       entities: { players, hostiles, animals },
     };
+  }
+  if (cmd === "inbox") {
+    const messages = [...instance.chatInbox];
+    instance.chatInbox.length = 0;
+    return { messages, count: messages.length };
+  }
+  if (cmd === "direct") {
+    const text = params.message;
+    if (!text) return { error: "need message param" };
+    const interrupt = params.interrupt === "true" || params.interrupt === true;
+    instance.directives.push({ text, ts: new Date().toISOString(), interrupt });
+    if (instance.directives.length > 50) instance.directives.shift();
+    if (interrupt) {
+      bot.pathfinder.stop();
+      bot.stopDigging?.();
+    }
+    return { status: interrupt ? "directive posted + interrupted current action" : "directive posted", pending: instance.directives.length };
+  }
+  if (cmd === "directives") {
+    const peek = params.peek === "true" || params.peek === true;
+    const clear = params.clear === "true" || params.clear === true;
+    if (clear) {
+      const cleared = instance.directives.length;
+      instance.directives.length = 0;
+      return { status: "directives cleared", cleared };
+    }
+    const items = [...instance.directives];
+    if (!peek) instance.directives.length = 0;
+    return { directives: items, count: items.length, peeked: peek };
   }
   if (cmd === "give") {
     const player = params.player;
@@ -476,94 +780,9 @@ async function handleCommand(instance: BotInstance, cmd: string, params: any): P
   }
 
   if (cmd === "screenshot") {
-    const radius = Number(params.radius) || 64;
-    const scale = Number(params.scale) || 4;
-    const p = bot.entity.position;
-    const cx = Math.floor(p.x);
-    const cz = Math.floor(p.z);
-    const size = radius * 2 + 1;
-    const imgSize = size * scale;
-
-    const colorFor = (name: string): [number, number, number] => {
-      if (name.includes("oak_log")) return [109, 85, 50];
-      if (name.includes("birch_log")) return [216, 206, 189];
-      if (name.includes("spruce_log")) return [58, 37, 16];
-      if (name.includes("jungle_log")) return [149, 109, 52];
-      if (name.includes("log")) return [109, 85, 50];
-      if (name.includes("oak_leaves")) return [59, 122, 24];
-      if (name.includes("birch_leaves")) return [80, 140, 47];
-      if (name.includes("spruce_leaves")) return [37, 72, 37];
-      if (name.includes("leaves")) return [55, 120, 30];
-      if (name === "water" || name === "flowing_water") return [44, 100, 201];
-      if (name === "lava" || name === "flowing_lava") return [207, 92, 15];
-      if (name === "grass_block") return [106, 170, 64];
-      if (name === "dirt") return [134, 96, 67];
-      if (name === "sand") return [219, 207, 163];
-      if (name === "stone" || name === "cobblestone") return [125, 125, 125];
-      if (name === "deepslate") return [80, 80, 85];
-      if (name.includes("ore")) return [140, 130, 100];
-      if (name === "gravel") return [131, 127, 126];
-      if (name === "snow" || name === "snow_block") return [249, 254, 254];
-      if (name.includes("plank")) return [162, 130, 78];
-      if (name === "air" || name === "cave_air") return [68, 130, 180];
-      return [120, 110, 100];
-    };
-
-    const pixels = Buffer.alloc(imgSize * imgSize * 3);
-    const entities = Object.values(bot.entities) as any[];
-
-    for (let dz = -radius; dz <= radius; dz++) {
-      for (let dx = -radius; dx <= radius; dx++) {
-        const x = cx + dx;
-        const z = cz + dz;
-        let color: [number, number, number] = [68, 130, 180];
-
-        for (let y = Math.min(Math.floor(p.y) + 30, 319); y >= Math.max(Math.floor(p.y) - 30, -64); y--) {
-          const block = bot.blockAt(new Vec3(x, y, z));
-          if (block && block.name !== "air" && block.name !== "cave_air") {
-            const base = colorFor(block.name);
-            const heightDiff = y - Math.floor(p.y);
-            const bright = Math.max(0.6, Math.min(1.1, 1 + heightDiff * 0.015));
-            color = [
-              Math.min(255, Math.floor(base[0] * bright)),
-              Math.min(255, Math.floor(base[1] * bright)),
-              Math.min(255, Math.floor(base[2] * bright)),
-            ];
-            break;
-          }
-        }
-
-        const entityHere = entities.find((e: any) =>
-          e !== bot.entity &&
-          Math.floor(e.position.x) === x &&
-          Math.floor(e.position.z) === z
-        );
-        if (entityHere) {
-          if (entityHere.type === "player") color = [255, 255, 0];
-          else if (entityHere.type === "hostile") color = [255, 0, 0];
-          else color = [255, 165, 0];
-        }
-        if (dx === 0 && dz === 0) color = [255, 0, 255];
-
-        const px = (dx + radius) * scale;
-        const pz = (dz + radius) * scale;
-        for (let sy = 0; sy < scale; sy++) {
-          for (let sx = 0; sx < scale; sx++) {
-            const offset = ((pz + sy) * imgSize + (px + sx)) * 3;
-            pixels[offset] = color[0];
-            pixels[offset + 1] = color[1];
-            pixels[offset + 2] = color[2];
-          }
-        }
-      }
-    }
-
-    const file = `/tmp/mcbot-${instance.name}-${Date.now()}.png`;
-    await sharp(pixels, { raw: { width: imgSize, height: imgSize, channels: 3 } })
-      .png()
-      .toFile(file);
-
-    return { file };
+    // Kept command name for compatibility, but output is now lightweight text context (no PNG).
+    const requestedSize = Number(params.size || params.radius) || 16;
+    return buildTokenContext(bot, requestedSize);
   }
   if (cmd === "pov") {
     const width = Number(params.width) || 160;
@@ -868,6 +1087,78 @@ function getInventory(bot: any) {
     count: i.count,
     slot: i.slot,
   }));
+}
+
+function buildTokenContext(bot: any, requestedSize: number) {
+  const p = bot.entity.position;
+  const cx = Math.floor(p.x);
+  const cy = Math.floor(p.y);
+  const cz = Math.floor(p.z);
+
+  const size = Math.max(8, Math.min(32, Math.floor(requestedSize)));
+  const half = Math.floor(size / 2);
+  const topY = Math.min(cy + 10, 319);
+  const bottomY = Math.max(cy - 10, -64);
+  const entities = Object.values(bot.entities) as any[];
+
+  const charFor = (name: string): string => {
+    if (name.includes("log")) return "T";
+    if (name.includes("leaves")) return "*";
+    if (name === "water" || name === "flowing_water") return "~";
+    if (name === "lava" || name === "flowing_lava") return "!";
+    if (name.includes("ore")) return "o";
+    if (name === "grass_block" || name === "dirt" || name === "podzol" || name === "mycelium") return ".";
+    if (name === "sand" || name === "red_sand") return ":";
+    if (name === "stone" || name === "deepslate" || name === "cobblestone") return "#";
+    if (name === "gravel") return "%";
+    if (name.includes("plank") || name.includes("fence") || name.includes("door")) return "=";
+    if (name === "air" || name === "cave_air") return " ";
+    return "-";
+  };
+
+  const rows: string[] = [];
+  for (let dz = -half; dz < size - half; dz++) {
+    let row = "";
+    for (let dx = -half; dx < size - half; dx++) {
+      if (dx === 0 && dz === 0) {
+        row += "B";
+        continue;
+      }
+
+      const x = cx + dx;
+      const z = cz + dz;
+      const entityHere = entities.find((e: any) =>
+        e !== bot.entity &&
+        Math.floor(e.position.x) === x &&
+        Math.floor(e.position.z) === z
+      );
+      if (entityHere) {
+        if (entityHere.type === "player") row += "P";
+        else if (entityHere.type === "hostile") row += "H";
+        else row += "@";
+        continue;
+      }
+
+      let ch = " ";
+      for (let y = topY; y >= bottomY; y--) {
+        const block = bot.blockAt(new Vec3(x, y, z));
+        if (block && block.name !== "air" && block.name !== "cave_air") {
+          ch = charFor(block.name);
+          break;
+        }
+      }
+      row += ch;
+    }
+    rows.push(row);
+  }
+
+  return {
+    mode: "text-context",
+    center: { x: cx, y: cy, z: cz },
+    size,
+    legend: "B=bot P=player H=hostile @=entity T=log *=leaves ~=water !=lava o=ore .=soil #=stone-like :=sand %=gravel ==manmade",
+    context: rows.join("\n"),
+  };
 }
 
 function pickBestRecipe(allRecipes: any[], mcData: any): any {

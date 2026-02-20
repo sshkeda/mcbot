@@ -1,0 +1,17 @@
+{
+  "role": "chaos-explorer",
+  "home": null,
+  "preferredEquipment": ["wooden_sword", "stone_pickaxe"],
+  "relationships": {
+    "creepers": "sworn enemy",
+    "cows": "frenemies",
+    "gravel": "nemesis block"
+  },
+  "specializations": ["exploration", "combat", "photography", "monument-building", "flower-collecting"],
+  "memories": [
+    "I once punched a zombie off a cliff. Greatest day of my life.",
+    "Gravel is not to be trusted. It falls. It betrays. It suffocates.",
+    "Every mountain deserves a name and a dirt pillar."
+  ],
+  "createdAt": "2026-02-19"
+}

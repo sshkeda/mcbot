@@ -1,4 +1,6 @@
 #!/usr/bin/env bun
+import { readFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   applyPositional,
   formatCommandError,
@@ -8,6 +10,8 @@ import {
 } from "./lib/commands";
 
 const API = `http://localhost:${process.env.MCBOT_API_PORT || 3847}`;
+const PROFILES_DIR = join(import.meta.dirname, "mcbots");
+const DEFAULT_BOT = process.env.MCBOT_NAME || "";
 const allArgs = process.argv.slice(2);
 
 function printHelp() {
@@ -26,6 +30,10 @@ USAGE
   mcbot <command>                     Fleet command
   mcbot <botName> <command> [opts]    Bot command
 
+ENVIRONMENT
+  MCBOT_NAME=<name>    Default bot — skip typing the name each time
+  MCBOT_API_PORT=N     API port (default: 3847)
+${DEFAULT_BOT ? `\n  (current default bot: ${DEFAULT_BOT})\n` : ""}
 FLEET`);
   printRows(fleet);
 
@@ -73,6 +81,12 @@ if (resolveCommand("fleet", allArgs[0])) {
   scope = "fleet";
   cmdInput = allArgs[0]!;
   args = allArgs.slice(1);
+} else if (DEFAULT_BOT && resolveCommand("bot", allArgs[0])) {
+  // MCBOT_NAME is set and first arg is a valid bot command — use default bot
+  scope = "bot";
+  botName = DEFAULT_BOT;
+  cmdInput = allArgs[0]!;
+  args = allArgs.slice(1);
 } else {
   scope = "bot";
   botName = allArgs[0] || null;
@@ -81,7 +95,7 @@ if (resolveCommand("fleet", allArgs[0])) {
 }
 
 if (scope === "bot" && !botName) {
-  console.error("error: need a bot name. use: mcbot <botName> <command>");
+  console.error("error: need a bot name (or set MCBOT_NAME). use: mcbot <botName> <command>");
   process.exit(1);
 }
 
@@ -100,6 +114,211 @@ if (validationError) {
   process.exit(1);
 }
 
+// ── Client-side commands (no server round-trip needed) ──────────────
+if (spec.name === "use") {
+  const name = params.name;
+  if (!name) {
+    if (DEFAULT_BOT) {
+      console.log(`current default bot: ${DEFAULT_BOT}`);
+    } else {
+      console.log("no default bot set");
+    }
+    console.log("\nusage: mcbot use <name>");
+    console.log("  then run:  export MCBOT_NAME=<name>");
+    console.log("  or:        eval $(mcbot use <name>)");
+    process.exit(0);
+  }
+  // Output an export command — user can eval it or copy-paste it
+  console.error(`# Run this in your terminal (or: eval $(mcbot use ${name}))`);
+  console.log(`export MCBOT_NAME=${name}`);
+  process.exit(0);
+}
+
+if (spec.name === "profile") {
+  const name = params.name;
+  if (!name) {
+    console.error("usage: mcbot profile <name> [--init] [--memory TEXT]");
+    process.exit(1);
+  }
+  const profileDir = join(PROFILES_DIR, name);
+  const soulPath = join(profileDir, "SOUL.md");
+  const metaPath = join(profileDir, "metadata.json");
+
+  if (params.init === "true") {
+    if (existsSync(profileDir)) {
+      console.error(`profile already exists: ${profileDir}`);
+      process.exit(1);
+    }
+    const templateDir = join(PROFILES_DIR, "_template");
+    mkdirSync(profileDir, { recursive: true });
+    const soulTemplate = readFileSync(join(templateDir, "SOUL.md"), "utf-8");
+    writeFileSync(join(profileDir, "SOUL.md"), soulTemplate.replace(/\{\{NAME\}\}/g, name));
+    const metaTemplate = JSON.parse(readFileSync(join(templateDir, "metadata.json"), "utf-8"));
+    metaTemplate.createdAt = new Date().toISOString();
+    writeFileSync(join(profileDir, "metadata.json"), JSON.stringify(metaTemplate, null, 2) + "\n");
+    console.log(`created profile: ${profileDir}`);
+    process.exit(0);
+  }
+
+  if (params.memory) {
+    if (!existsSync(metaPath)) {
+      console.error(`no profile for "${name}". create one with: mcbot profile ${name} --init`);
+      process.exit(1);
+    }
+    const meta = JSON.parse(readFileSync(metaPath, "utf-8"));
+    if (!Array.isArray(meta.memories)) meta.memories = [];
+    meta.memories.push(params.memory);
+    writeFileSync(metaPath, JSON.stringify(meta, null, 2) + "\n");
+    console.log(`added memory (${meta.memories.length} total)`);
+    process.exit(0);
+  }
+
+  // Show profile
+  if (!existsSync(profileDir)) {
+    console.log(`no profile for "${name}". create one with: mcbot profile ${name} --init`);
+    process.exit(0);
+  }
+  if (existsSync(soulPath)) {
+    console.log(readFileSync(soulPath, "utf-8"));
+  }
+  if (existsSync(metaPath)) {
+    const meta = JSON.parse(readFileSync(metaPath, "utf-8"));
+    console.log("--- metadata ---");
+    if (meta.role) console.log(`role: ${meta.role}`);
+    if (meta.home) console.log(`home: ${meta.home.x} ${meta.home.y} ${meta.home.z}`);
+    if (meta.preferredEquipment?.length) console.log(`equipment: ${meta.preferredEquipment.join(", ")}`);
+    if (meta.specializations?.length) console.log(`specializations: ${meta.specializations.join(", ")}`);
+    if (meta.relationships && Object.keys(meta.relationships).length) {
+      console.log("relationships:");
+      for (const [bot, rel] of Object.entries(meta.relationships)) console.log(`  ${bot}: ${rel}`);
+    }
+    if (meta.memories?.length) {
+      console.log(`memories (${meta.memories.length}):`);
+      for (const m of meta.memories.slice(-10)) console.log(`  - ${m}`);
+    }
+    if (meta.createdAt) console.log(`created: ${meta.createdAt}`);
+  }
+  process.exit(0);
+}
+
+if (spec.name === "context") {
+  const name = params.name;
+  if (!name) {
+    console.error("usage: mcbot context <name> [--goal GOAL]");
+    process.exit(1);
+  }
+  const goal = params.goal || "";
+  try {
+    // Fetch bot status + inventory for context
+    const [statusResRaw, invResRaw, listResRaw] = await Promise.all([
+      fetch(`${API}/${name}/status`).then(r => r.json()).catch(() => null),
+      fetch(`${API}/${name}/inventory`).then(r => r.json()).catch(() => null),
+      fetch(`${API}/list`).then(r => r.json()).catch(() => null),
+    ]);
+    const statusRes = statusResRaw as any;
+    const invRes = invResRaw as any;
+    const listRes = listResRaw as any;
+
+    const botCommands = getCommands("bot");
+    const cmdList = botCommands.map(c => `  bun run cli.ts ${name} ${c.usage.padEnd(50)} ${c.summary}`).join("\n");
+
+    // Read bot profile if it exists
+    let profileBlock = "";
+    const profileDir = join(PROFILES_DIR, name);
+    const soulPath = join(profileDir, "SOUL.md");
+    const metaPath = join(profileDir, "metadata.json");
+
+    if (existsSync(soulPath)) {
+      const soul = readFileSync(soulPath, "utf-8").trim();
+      if (soul) profileBlock += `\n\n## Personality & Identity\n${soul}`;
+    }
+
+    if (existsSync(metaPath)) {
+      try {
+        const meta = JSON.parse(readFileSync(metaPath, "utf-8"));
+        const parts: string[] = [];
+        if (meta.role) parts.push(`- Role: ${meta.role}`);
+        if (meta.home) parts.push(`- Home base: ${meta.home.x} ${meta.home.y} ${meta.home.z}`);
+        if (meta.preferredEquipment?.length) parts.push(`- Preferred equipment: ${meta.preferredEquipment.join(", ")}`);
+        if (meta.specializations?.length) parts.push(`- Specializations: ${meta.specializations.join(", ")}`);
+        if (meta.relationships && Object.keys(meta.relationships).length) {
+          parts.push("- Relationships:");
+          for (const [bot, rel] of Object.entries(meta.relationships)) parts.push(`  - ${bot}: ${rel}`);
+        }
+        if (meta.memories?.length) {
+          const recent = meta.memories.slice(-20);
+          parts.push(`- Memories (${meta.memories.length} total, showing last ${recent.length}):`);
+          for (const m of recent) parts.push(`  - ${m}`);
+        }
+        if (parts.length > 0) profileBlock += `\n\n## Profile Data\n${parts.join("\n")}`;
+      } catch {}
+    }
+
+    let statusBlock = "";
+    if (statusRes && !statusRes.error && statusRes.position) {
+      const s = statusRes;
+      statusBlock = `\n## Current State\n- Position: ${s.position.x} ${s.position.y} ${s.position.z}\n- Health: ${s.health}  Food: ${s.food}\n- Time: ${s.time}  Biome: ${s.biome}`;
+    }
+
+    let invBlock = "";
+    if (Array.isArray(invRes) && invRes.length > 0) {
+      invBlock = `\n\n## Inventory\n${invRes.map((i: any) => `- ${i.name} x${i.count}`).join("\n")}`;
+    }
+
+    let otherBots = "";
+    if (Array.isArray(listRes?.bots) && listRes.bots.length > 1) {
+      const others = listRes.bots.filter((b: any) => b.name !== name);
+      if (others.length > 0) {
+        otherBots = `\n\n## Other Active Bots\n${others.map((b: any) => `- ${b.name} at ${b.position.x} ${b.position.y} ${b.position.z}`).join("\n")}`;
+      }
+    }
+
+    const goalBlock = goal
+      ? `\n\n## Your Goal\n${goal}`
+      : `\n\n## Your Goal\nExplore and report on your surroundings`;
+
+    const prompt = `You are controlling the Minecraft bot "${name}" via CLI commands.
+All commands must be run from \`/srv/blockgame-server\` using \`bun run cli.ts\`.
+${profileBlock}${statusBlock}${invBlock}${otherBots}${goalBlock}
+
+## Available Commands
+${cmdList}
+
+## Rules
+- Run all commands via Bash: \`bun run cli.ts ${name} <command> [args]\`
+- After running pov or render, use the Read tool to view the returned PNG file path.
+- screenshot returns a text context grid (not a PNG).
+- Check \`bun run cli.ts ${name} status\` and \`bun run cli.ts ${name} inventory\` periodically to stay aware of your state.
+- If a command fails, read the error and try an alternative approach. Do not retry the same command blindly.
+- When done with the goal, report what you accomplished.
+- **Be efficient with turns** — batch independent commands together in a single response when possible (e.g. run \`goto\` and \`chat\` in parallel if they don't depend on each other). Each tool call costs a turn, and you have a finite budget.
+
+## Disconnect Detection & Recovery
+Your bot can disconnect at any time (server restart, kick, network issue). Watch for these signs:
+- **Error containing "not found" or "disconnected"** — the bot is gone from the server.
+- **Error containing "server not running"** — the mcbot API server itself is down.
+- **Commands hanging or timing out** — the bot may be in a broken state.
+
+**When you detect a disconnect:**
+1. Check if the server is still running: \`bun run cli.ts ping\`
+2. If the server is up but your bot is gone, respawn it: \`bun run cli.ts spawn ${name} --port 25565\`
+3. After respawning, re-check status and continue your goal from where you left off.
+4. If the server is also down, report the issue — you cannot recover without the server.
+
+## Progress Tracking
+Use task tracking tools to keep the user informed:
+- At the start, use **TaskCreate** to break your goal into concrete sub-tasks. Give each task a clear \`subject\`, \`description\`, and \`activeForm\`.
+- Use **TaskUpdate** to set status to \`in_progress\` when starting and \`completed\` when done.
+- If you discover new work mid-task, use **TaskCreate** to add it.`;
+
+    console.log(prompt);
+  } catch (err: any) {
+    console.error(`error: could not reach mcbot server — ${err.message}`);
+    process.exit(1);
+  }
+  process.exit(0);
+}
+
 const qs = new URLSearchParams(params).toString();
 const url = scope === "fleet"
   ? `${API}/${spec.name}${qs ? `?${qs}` : ""}`
@@ -107,15 +326,31 @@ const url = scope === "fleet"
 
 function formatOutput(command: string, data: any): void {
   if (command === "spawn") {
-    console.log(`spawned ${data.name} at ${data.x} ${data.y} ${data.z}`);
+    if (data.status === "batch") {
+      for (const s of data.spawned) console.log(`spawned ${s.name} at ${s.x} ${s.y} ${s.z}`);
+      for (const e of data.errors) console.log(`failed ${e.name}: ${e.error}`);
+      console.log(`${data.spawned.length}/${data.total} spawned`);
+    } else {
+      console.log(`spawned ${data.name} at ${data.x} ${data.y} ${data.z}`);
+    }
     return;
   }
   if (command === "list") {
     if (data.bots.length === 0) {
       console.log("no bots spawned");
     } else {
+      const now = Date.now();
       for (const b of data.bots) {
-        console.log(`  ${b.name}  pos: ${b.position.x} ${b.position.y} ${b.position.z}  hp: ${b.health}`);
+        if (b.status === "connecting") {
+          console.log(`  ${b.name}  (connecting...)`);
+        } else {
+          let line = `  ${b.name}  pos: ${b.position.x} ${b.position.y} ${b.position.z}  hp: ${b.health}`;
+          if (b.lastCommandAt) {
+            const ago = Math.round((now - b.lastCommandAt) / 1000);
+            if (ago < 30) line += `  \x1b[32m● active (${ago}s ago)\x1b[0m`;
+          }
+          console.log(line);
+        }
       }
     }
     return;
@@ -125,7 +360,9 @@ function formatOutput(command: string, data: any): void {
     return;
   }
   if (command === "ping") {
-    console.log(`server: ok  bots: [${data.bots.join(", ")}]`);
+    const parts = [`server: ok  bots: [${data.bots.join(", ")}]`];
+    if (data.connecting?.length > 0) parts.push(`connecting: [${data.connecting.join(", ")}]`);
+    console.log(parts.join("  "));
     return;
   }
   if (command === "tools") {
@@ -239,6 +476,17 @@ function formatOutput(command: string, data: any): void {
       console.log("  ores:");
       for (const [name, count] of Object.entries(blocks.ores)) console.log(`    ${name}: ${count}`);
     }
+    if (data.nearest) {
+      const n = data.nearest;
+      if (n.log) console.log(`  nearest log: ${n.log.x} ${n.log.y} ${n.log.z}`);
+      if (n.water) console.log(`  nearest water: ${n.water.x} ${n.water.y} ${n.water.z}`);
+      if (n.lava) console.log(`  nearest lava: ${n.lava.x} ${n.lava.y} ${n.lava.z}`);
+      if (n.ores && Object.keys(n.ores).length > 0) {
+        for (const [name, pos] of Object.entries(n.ores) as [string, any][]) {
+          console.log(`  nearest ${name}: ${pos.x} ${pos.y} ${pos.z}`);
+        }
+      }
+    }
     if (entities.players.length > 0) console.log(`  players: ${entities.players.join(", ")}`);
     console.log(`  hostiles: ${entities.hostiles}  animals: ${entities.animals}`);
     return;
@@ -247,7 +495,64 @@ function formatOutput(command: string, data: any): void {
     console.log(`camera ${data.name} placed at ${data.position.x} ${data.position.y} ${data.position.z}`);
     return;
   }
-  if (command === "screenshot" || command === "pov" || command === "render") {
+  if (command === "logs") {
+    if (!data.entries || data.entries.length === 0) {
+      console.log("no activity yet");
+      if (data.file) console.log(`log file: ${data.file}`);
+      return;
+    }
+    for (const e of data.entries) {
+      const time = e.ts.slice(11, 19); // HH:MM:SS
+      const dur = `${e.durationMs}ms`.padStart(7);
+      const status = e.ok ? " " : "!";
+      console.log(`${time} ${status} [${e.bot.padEnd(12)}] ${e.command.padEnd(12)} ${dur}  ${e.summary}`);
+    }
+    console.log(`\n${data.entries.length} entries (log file: ${data.file})`);
+    return;
+  }
+  if (command === "inbox") {
+    if (data.count === 0) {
+      console.log("(no messages)");
+    } else {
+      for (const m of data.messages) {
+        const time = m.ts.slice(11, 19);
+        console.log(`${time} <${m.sender}> ${m.message}`);
+      }
+      console.log(`\n${data.count} message(s)`);
+    }
+    return;
+  }
+  if (command === "direct") {
+    console.log(`directive posted (${data.pending} pending)`);
+    return;
+  }
+  if (command === "directives") {
+    if (data.count === 0) {
+      console.log("(no directives)");
+    } else {
+      for (const d of data.directives) {
+        const time = d.ts.slice(11, 19);
+        console.log(`${time} ${d.text}`);
+      }
+      console.log(`\n${data.count} directive(s)`);
+    }
+    return;
+  }
+  if (command === "screenshot") {
+    if (data.context) {
+      console.log(`context ${data.size}x${data.size} @ ${data.center.x} ${data.center.y} ${data.center.z}`);
+      console.log(data.legend);
+      console.log(data.context);
+      return;
+    }
+    if (data.file) {
+      console.log(data.file);
+      return;
+    }
+    console.log(JSON.stringify(data));
+    return;
+  }
+  if (command === "pov" || command === "render") {
     console.log(data.file);
     return;
   }

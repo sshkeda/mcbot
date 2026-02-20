@@ -28,11 +28,15 @@ const FLEET_COMMANDS: CommandSpec[] = [
     scope: "fleet",
     family: "fleet.manage",
     tool: "fleet.manage.spawn",
-    usage: "spawn <name> [--host H] [--port P] [--version V]",
-    summary: "Spawn a new bot",
+    usage: "spawn <name...> [--host H] [--port P] [--version V]",
+    summary: "Spawn one or more bots (space or comma separated)",
     requiredParams: ["name"],
     parsePositional: (positional, params) => {
-      if (positional[0]) params.name = positional[0];
+      if (positional.length > 1) {
+        params.name = positional.join(",");
+      } else if (positional[0]) {
+        params.name = positional[0];
+      }
     },
   },
   {
@@ -106,6 +110,48 @@ const FLEET_COMMANDS: CommandSpec[] = [
       if (positional[0]) params.tool = positional[0];
     },
   },
+  {
+    name: "logs",
+    scope: "fleet",
+    family: "fleet.manage",
+    tool: "fleet.manage.logs",
+    usage: "logs [--bot NAME] [--count N]",
+    summary: "View activity log (all bots or filtered)",
+  },
+  {
+    name: "use",
+    scope: "fleet",
+    family: "fleet.manage",
+    tool: "fleet.manage.use",
+    usage: "use <name>",
+    summary: "Set default bot for this terminal (prints export)",
+    parsePositional: (positional, params) => {
+      if (positional[0]) params.name = positional[0];
+    },
+  },
+  {
+    name: "context",
+    scope: "fleet",
+    family: "fleet.manage",
+    tool: "fleet.manage.context",
+    usage: "context <name> [--goal GOAL]",
+    summary: "Generate Claude Code subagent prompt for a bot",
+    requiredParams: ["name"],
+    parsePositional: (positional, params) => {
+      if (positional[0]) params.name = positional[0];
+    },
+  },
+  {
+    name: "profile",
+    scope: "fleet",
+    family: "fleet.manage",
+    tool: "fleet.manage.profile",
+    usage: "profile <name> [--init] [--memory TEXT]",
+    summary: "View/init bot profile or add a memory",
+    parsePositional: (positional, params) => {
+      if (positional[0]) params.name = positional[0];
+    },
+  },
 ];
 
 const BOT_COMMANDS: CommandSpec[] = [
@@ -166,6 +212,34 @@ const BOT_COMMANDS: CommandSpec[] = [
     tool: "world.observe.survey",
     usage: "survey [--radius N]",
     summary: "Scan area for blocks, mobs, players",
+  },
+  {
+    name: "inbox",
+    scope: "bot",
+    family: "world.observe",
+    tool: "world.observe.inbox",
+    usage: "inbox",
+    summary: "Read and drain chat messages received by this bot",
+  },
+  {
+    name: "direct",
+    scope: "bot",
+    family: "world.interact",
+    tool: "world.interact.direct",
+    usage: "direct <message> [--interrupt]",
+    summary: "Post a directive for the action agent (--interrupt stops current action)",
+    requiredParams: ["message"],
+    parsePositional: (positional, params) => {
+      params.message = positional.join(" ");
+    },
+  },
+  {
+    name: "directives",
+    scope: "bot",
+    family: "world.observe",
+    tool: "world.observe.directives",
+    usage: "directives [--peek] [--clear]",
+    summary: "Read and drain pending directives (--peek to view without draining, --clear to cancel all)",
   },
   {
     name: "chop",
@@ -310,8 +384,11 @@ const BOT_COMMANDS: CommandSpec[] = [
     scope: "bot",
     family: "world.interact",
     tool: "world.interact.attack",
-    usage: "attack",
-    summary: "Attack nearest hostile",
+    usage: "attack [<player>]",
+    summary: "Attack nearest hostile or a specific player",
+    parsePositional: (positional: string[], params: any) => {
+      if (positional.length > 0) params.target = positional.join("");
+    },
   },
   {
     name: "dig",
@@ -378,8 +455,8 @@ const BOT_COMMANDS: CommandSpec[] = [
     scope: "bot",
     family: "world.observe",
     tool: "world.observe.screenshot",
-    usage: "screenshot [--radius N] [--scale N]",
-    summary: "Top-down color PNG map",
+    usage: "screenshot [--size N]",
+    summary: "Fast top-down text context grid (no PNG)",
   },
   {
     name: "pov",

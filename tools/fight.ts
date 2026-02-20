@@ -1,4 +1,5 @@
 import { sleep, withTimeout } from "../lib/utils";
+import { getAttackCooldownMs, isInMeleeRange, vanillaMeleeAttack } from "../lib/combat";
 
 export async function fightMobs(bot: any, pathfinder: any, opts: { radius?: number; count?: number } = {}) {
   const { GoalNear } = pathfinder.goals;
@@ -6,6 +7,7 @@ export async function fightMobs(bot: any, pathfinder: any, opts: { radius?: numb
   const maxKills = opts.count || 10;
 
   await equipBestWeapon(bot);
+  let lastAttackAt = 0;
 
   const killed: string[] = [];
 
@@ -28,11 +30,21 @@ export async function fightMobs(bot: any, pathfinder: any, opts: { radius?: numb
 
     // Attack until dead or gone
     while (hostile.isValid && hostile.position.distanceTo(bot.entity.position) < radius) {
-      if (hostile.position.distanceTo(bot.entity.position) > 4) {
-        bot.pathfinder.setGoal(new GoalNear(hostile.position.x, hostile.position.y, hostile.position.z, 3));
+      const dist = hostile.position.distanceTo(bot.entity.position);
+      if (dist > 3.3) {
+        bot.pathfinder.setGoal(new GoalNear(hostile.position.x, hostile.position.y, hostile.position.z, 2), true);
+      } else {
+        bot.pathfinder.stop();
       }
-      await bot.attack(hostile);
-      await sleep(500);
+
+      const cooldownMs = getAttackCooldownMs(bot);
+      const now = Date.now();
+      if (now - lastAttackAt >= cooldownMs && isInMeleeRange(bot, hostile, 0.35)) {
+        const attacked = await vanillaMeleeAttack(bot, hostile);
+        if (attacked) lastAttackAt = Date.now();
+      }
+
+      await sleep(50);
     }
 
     bot.pathfinder.stop();

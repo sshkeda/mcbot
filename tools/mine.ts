@@ -44,14 +44,14 @@ export async function mineBlocks(bot: any, pathfinder: any, blockName: string, o
       console.log(`[MINE] Broke ${target.name} (${mined.length}/${count})`);
 
       // Auto-collect the drop
-      await sleep(300);
+      await sleep(120);
       const drop = Object.values(bot.entities).find(
         (e: any) => e.name === "item" && e.position.distanceTo(digPos) < 3
       ) as any;
       if (drop?.isValid) {
         try {
-          await withTimeout(bot.pathfinder.goto(new GoalNear(drop.position.x, drop.position.y, drop.position.z, 1)), 5000);
-          await sleep(200);
+          await withTimeout(bot.pathfinder.goto(new GoalNear(drop.position.x, drop.position.y, drop.position.z, 1)), 3500);
+          await sleep(80);
         } catch {
           bot.pathfinder.stop();
         }
