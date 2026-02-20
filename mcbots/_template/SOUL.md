@@ -14,5 +14,5 @@ Any backstory or history for this bot.
 
 ## Behavioral Rules
 - List specific rules this bot should follow
-- e.g., Always take a screenshot before starting any task
+- e.g., Always survey before starting any task
 - e.g., Avoid combat unless necessary

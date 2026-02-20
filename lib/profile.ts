@@ -21,6 +21,10 @@ export function runProfile(profilesDir: string, params: Record<string, string>):
     mkdirSync(join(profileDir, "memories"), { recursive: true });
     const soulTemplate = readFileSync(join(templateDir, "SOUL.md"), "utf-8");
     writeFileSync(join(profileDir, "SOUL.md"), soulTemplate.replace(/\{\{NAME\}\}/g, name));
+    const todoTemplatePath = join(templateDir, "TODO.md");
+    if (existsSync(todoTemplatePath)) {
+      writeFileSync(join(profileDir, "TODO.md"), readFileSync(todoTemplatePath, "utf-8"));
+    }
     console.log(`created profile: ${profileDir}`);
     process.exit(0);
   }
@@ -42,6 +46,11 @@ export function runProfile(profilesDir: string, params: Record<string, string>):
   }
   if (existsSync(soulPath)) {
     console.log(readFileSync(soulPath, "utf-8"));
+  }
+  const todoPath = join(profileDir, "TODO.md");
+  if (existsSync(todoPath)) {
+    console.log("--- todo ---");
+    console.log(readFileSync(todoPath, "utf-8"));
   }
   const memories = readAllMemories(profileDir);
   if (memories) {

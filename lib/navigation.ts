@@ -1,7 +1,7 @@
 /**
  * Shared navigation engine: chunked pathfinding with manual fallback.
  *
- * Used by both the server.ts `goto` command and the `smart_goto` / `goto`
+ * Used by both the server.ts `goto` command and the `goto`
  * skills via the ExecuteContext. One config schema so behavior cannot drift.
  */
 

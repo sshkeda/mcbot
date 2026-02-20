@@ -227,6 +227,11 @@ export class ActionQueue {
       }
     } finally {
       this.processing = false;
+      // Re-check: if new actions were pushed while we were finishing up,
+      // restart the loop (avoids race where push() saw processing=true
+      // but the loop was about to exit).
+      const hasPending = this.queue.some((a) => a.status === "pending");
+      if (hasPending) this.processLoop();
     }
   }
 }

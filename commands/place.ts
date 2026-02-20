@@ -9,7 +9,7 @@ export default async function (instance: BotInstance, params: any) {
     if (!pos) return { error: `unknown direction "${params.dir}". use: front/back/left/right/up/down` };
     x = String(pos.x); y = String(pos.y); z = String(pos.z);
   }
-  if (!x || !y || !z) return { error: "need x,y,z or --dir front/back/left/right/up/down" };
+  if (x == null || y == null || z == null) return { error: "need x,y,z or --dir front/back/left/right/up/down" };
   const blockName = params.block || "cobblestone";
   const item = bot.inventory.items().find((i: any) => i.name === blockName);
   if (!item) return { error: `no ${blockName} in inventory` };

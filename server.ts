@@ -91,7 +91,6 @@ function summarizeResult(command: string, data: any): string {
   if (command === "place") return data.placed ? `placed ${data.block}` : `failed: ${data.error}`;
   if (command === "kill" || command === "killall") return data.status;
   if (command === "list") return `${data.bots?.length || 0} bots`;
-  if (command === "screenshot") return data.file || `${data.size || 0}x${data.size || 0} context`;
   if (command === "pov" || command === "render") return data.file || "";
   return data.status || data.message || "";
 }

@@ -82,6 +82,36 @@ export function resolveRelativePos(bot: any, dir: string): { x: number; y: numbe
   };
 }
 
+/** Check if the chunk at (x, z) is loaded. */
+export function isChunkLoaded(bot: any, x: number, z: number): boolean {
+  try {
+    const col = bot.world.getColumnAt(new Vec3(x, 0, z));
+    return col != null;
+  } catch { return false; }
+}
+
+/** Calculate fraction of chunks loaded within a radius of the bot. */
+export function chunkCoverage(bot: any, radius: number): { loaded: number; total: number; fraction: number } {
+  const p = bot.entity.position;
+  const cx = Math.floor(p.x);
+  const cz = Math.floor(p.z);
+  const seen = new Set<string>();
+  let loaded = 0;
+  let total = 0;
+  for (let dx = -radius; dx <= radius; dx += 16) {
+    for (let dz = -radius; dz <= radius; dz += 16) {
+      const chunkX = (cx + dx) >> 4;
+      const chunkZ = (cz + dz) >> 4;
+      const key = `${chunkX},${chunkZ}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      total++;
+      if (isChunkLoaded(bot, chunkX * 16, chunkZ * 16)) loaded++;
+    }
+  }
+  return { loaded, total, fraction: total > 0 ? +(loaded / total).toFixed(2) : 0 };
+}
+
 export function getStatus(bot: any, mcData: any) {
   let biome = "unknown";
   const block = bot.blockAt(bot.entity.position);
@@ -114,11 +144,13 @@ export function getLook(bot: any) {
     }));
 
   const blockAt = bot.blockAtCursor(5);
+  const chunks = chunkCoverage(bot, 20);
   return {
     position: posOf(bot),
     lookingAt: blockAt ? blockAt.name : null,
     standingOn: bot.blockAt(p.offset(0, -1, 0))?.name || null,
     nearby,
+    chunks,
   };
 }
 

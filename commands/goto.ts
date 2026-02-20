@@ -4,7 +4,7 @@ import { Vec3, GoalNear, runGoto } from "./_helpers";
 export default async function (instance: BotInstance, params: any) {
   const { bot } = instance;
   const { x, y, z } = params;
-  if (!x || !y || !z) return { error: "need x, y, z params" };
+  if (x == null || y == null || z == null) return { error: "need x, y, z params" };
   const gotoResult = await runGoto(
     { bot, Vec3, GoalNear },
     { x: Number(x), y: Number(y), z: Number(z) },

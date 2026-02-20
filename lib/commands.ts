@@ -226,6 +226,45 @@ const BOT_COMMANDS: CommandSpec[] = [
     },
   },
   {
+    name: "probe",
+    scope: "bot",
+    family: "world.observe",
+    tool: "world.observe.probe",
+    usage: "probe <x> <y> <z>",
+    summary: "Quick block check at position (name, solid, properties)",
+    requiredParams: ["x", "y", "z"],
+    parsePositional: (positional, params) => {
+      if (positional[0]) params.x = positional[0];
+      if (positional[1]) params.y = positional[1];
+      if (positional[2]) params.z = positional[2];
+    },
+  },
+  {
+    name: "scan_volume",
+    scope: "bot",
+    family: "world.observe",
+    tool: "world.observe.scan_volume",
+    usage: "scan_volume <x1> <y1> <z1> <x2> <y2> <z2>",
+    summary: "Scan a rectangular volume, return sparse non-air block list + counts",
+    requiredParams: ["x1", "y1", "z1", "x2", "y2", "z2"],
+    parsePositional: (positional, params) => {
+      if (positional[0]) params.x1 = positional[0];
+      if (positional[1]) params.y1 = positional[1];
+      if (positional[2]) params.z1 = positional[2];
+      if (positional[3]) params.x2 = positional[3];
+      if (positional[4]) params.y2 = positional[4];
+      if (positional[5]) params.z2 = positional[5];
+    },
+  },
+  {
+    name: "diff_blueprint",
+    scope: "bot",
+    family: "world.observe",
+    tool: "world.observe.diff_blueprint",
+    usage: "diff_blueprint (POST: {origin: {x,y,z}, blueprint: [{dx,dy,dz,block},...]})",
+    summary: "Compare a blueprint against world state. Returns missing/wrong/placed + next placement candidates",
+  },
+  {
     name: "recipes",
     scope: "bot",
     family: "world.observe",
@@ -279,8 +318,8 @@ const BOT_COMMANDS: CommandSpec[] = [
     family: "world.observe",
     tool: "world.observe.state",
     usage: "state",
-    summary: "Fast lightweight state poll (position, velocity, health, collision, action)",
-    aliases: ["fast_state"],
+    summary: "Wait up to 5s for action completion, then return full snapshot (position, velocity, health, collision, action, inbox, directives)",
+    aliases: ["fast_state", "poll"],
   },
   {
     name: "execute",
@@ -297,14 +336,6 @@ const BOT_COMMANDS: CommandSpec[] = [
     tool: "task.run.queue",
     usage: "queue [--cancel current|all|<id>]",
     summary: "View action queue or cancel actions",
-  },
-  {
-    name: "poll",
-    scope: "bot",
-    family: "task.run",
-    tool: "task.run.poll",
-    usage: "poll [--timeout N]",
-    summary: "Long-poll: blocks up to 15s, returns early when an action finishes. Full snapshot.",
   },
   {
     name: "skills",
@@ -467,22 +498,6 @@ const BOT_COMMANDS: CommandSpec[] = [
       if (positional[0]) params.player = positional[0];
       if (positional[1]) params.item = positional[1];
     },
-  },
-  {
-    name: "map",
-    scope: "bot",
-    family: "world.observe",
-    tool: "world.observe.map",
-    usage: "map [--radius N]",
-    summary: "Top-down ASCII map of surroundings",
-  },
-  {
-    name: "screenshot",
-    scope: "bot",
-    family: "world.observe",
-    tool: "world.observe.screenshot",
-    usage: "screenshot [--size N]",
-    summary: "Fast top-down text context grid (no PNG)",
   },
   {
     name: "pov",

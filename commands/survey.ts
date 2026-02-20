@@ -1,5 +1,5 @@
 import type { BotInstance } from "./_helpers";
-import { posOf } from "./_helpers";
+import { posOf, chunkCoverage } from "./_helpers";
 
 export default async function (instance: BotInstance, params: any) {
   const { bot, mcData } = instance;
@@ -48,9 +48,12 @@ export default async function (instance: BotInstance, params: any) {
   const hostiles = nearby.filter((e: any) => e.type === "hostile").length;
   const animals = nearby.filter((e: any) => e.type === "animal").length;
 
+  const chunks = chunkCoverage(bot, radius);
+
   return {
     position: posOf(bot),
     radius,
+    chunks,
     blocks: { logs: logs.length, water: water.length, lava: lava.length, ores: oreCounts },
     nearest: {
       log: nearest(logs),

@@ -125,12 +125,31 @@ export function formatOutput(command: string, data: any): void {
   if (command === "state") {
     const p = data.position;
     const v = data.velocity;
-    let line = `pos: ${p.x} ${p.y} ${p.z}  vel: ${v.x} ${v.y} ${v.z}  hp: ${data.health}  food: ${data.food}`;
+    let line = `[${data.ts?.slice(11, 19)}] pos: ${p.x} ${p.y} ${p.z}  vel: ${v.x} ${v.y} ${v.z}  hp: ${data.health}  food: ${data.food}  ${data.time}  ${data.biome}`;
     if (data.isCollidedHorizontally) line += "  COLLIDED";
     if (!data.onGround) line += "  AIRBORNE";
     console.log(line);
-    if (data.currentAction) console.log(`action: ${data.currentAction.name} (${data.currentAction.status})`);
-    console.log(`queue: ${data.queueLength} pending  inbox: ${data.inboxCount}  directives: ${data.directiveCount}  ${data.time}  ${data.biome}`);
+    if (data.currentAction) {
+      console.log(`  action: ${data.currentAction.name} (${data.currentAction.status})`);
+    } else {
+      console.log(`  action: idle`);
+    }
+    if (data.queueLength > 0) console.log(`  queue: ${data.queueLength} pending`);
+    if (data.completed?.length > 0) {
+      for (const a of data.completed) {
+        const dur = a.startedAt && a.finishedAt ? `${new Date(a.finishedAt).getTime() - new Date(a.startedAt).getTime()}ms` : "";
+        const status = a.status === "done" ? "OK" : a.status.toUpperCase();
+        console.log(`  finished: ${a.name} [${status}] ${dur}`);
+        if (a.logs?.length) for (const l of a.logs) console.log(`    > ${l}`);
+        if (a.error) console.log(`    ! ${a.error}`);
+      }
+    }
+    if (data.inbox?.length > 0) {
+      for (const m of data.inbox) console.log(`  chat: <${m.sender}> ${m.message}`);
+    }
+    if (data.directives?.length > 0) {
+      for (const d of data.directives) console.log(`  directive: ${d.text}`);
+    }
     return;
   }
   if (command === "skills") {
@@ -245,53 +264,10 @@ export function formatOutput(command: string, data: any): void {
     }
     return;
   }
-  if (command === "poll") {
-    const pos = data.position;
-    console.log(`[${data.ts?.slice(11, 19)}] pos: ${pos.x} ${pos.y} ${pos.z}  hp: ${data.health}  food: ${data.food}  ${data.time}`);
-    if (data.currentAction) {
-      console.log(`  action: ${data.currentAction.name} (${data.currentAction.status})`);
-    } else {
-      console.log(`  action: idle`);
-    }
-    if (data.queueLength > 0) console.log(`  queue: ${data.queueLength} pending`);
-    if (data.completed?.length > 0) {
-      for (const a of data.completed) {
-        const dur = a.startedAt && a.finishedAt ? `${new Date(a.finishedAt).getTime() - new Date(a.startedAt).getTime()}ms` : "";
-        const status = a.status === "done" ? "OK" : a.status.toUpperCase();
-        console.log(`  finished: ${a.name} [${status}] ${dur}`);
-        if (a.logs?.length) for (const l of a.logs) console.log(`    > ${l}`);
-        if (a.error) console.log(`    ! ${a.error}`);
-      }
-    }
-    if (data.inbox?.length > 0) {
-      for (const m of data.inbox) console.log(`  chat: <${m.sender}> ${m.message}`);
-    }
-    if (data.directives?.length > 0) {
-      for (const d of data.directives) console.log(`  directive: ${d.text}`);
-    }
-    return;
-  }
-  if (command === "screenshot") {
-    if (data.context) {
-      console.log(data.context);
-      return;
-    }
-    if (data.file) {
-      console.log(data.file);
-      return;
-    }
-    console.log(JSON.stringify(data));
-    return;
-  }
   if (command === "pov" || command === "render") {
     console.log(data.file);
     return;
   }
-  if (command === "map") {
-    console.log(data.map);
-    return;
-  }
-
   const msg = data.status || data.message || JSON.stringify(data);
   console.log(msg);
 }

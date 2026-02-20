@@ -70,7 +70,6 @@ ${cmdList}
 ## Rules
 - Run all commands via Bash: \`bun run cli.ts ${name} <command> [args]\`
 - After running pov or render, use the Read tool to view the returned PNG file path.
-- screenshot returns a text context grid (not a PNG).
 - Check \`bun run cli.ts ${name} status\` and \`bun run cli.ts ${name} inventory\` periodically to stay aware of your state.
 - If a command fails, read the error and try an alternative approach. Do not retry the same command blindly.
 - When done with the goal, report what you accomplished.
