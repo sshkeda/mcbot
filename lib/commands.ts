@@ -60,7 +60,7 @@ const FLEET_COMMANDS: CommandSpec[] = [
     family: "fleet.manage",
     tool: "fleet.manage.list",
     usage: "list",
-    summary: "List all bots",
+    summary: "List all bots (with lock status)",
   },
   {
     name: "kill",
@@ -117,6 +117,38 @@ const FLEET_COMMANDS: CommandSpec[] = [
     tool: "fleet.manage.logs",
     usage: "logs [--bot NAME] [--count N]",
     summary: "View activity log (all bots or filtered)",
+  },
+  {
+    name: "locks",
+    scope: "fleet",
+    family: "fleet.manage",
+    tool: "fleet.manage.locks",
+    usage: "locks",
+    summary: "Show all bot locks across terminals",
+  },
+  {
+    name: "lock",
+    scope: "fleet",
+    family: "fleet.manage",
+    tool: "fleet.manage.lock",
+    usage: "lock <name> [--agent AGENT] [--goal GOAL]",
+    summary: "Acquire control lock on a bot",
+    requiredParams: ["name"],
+    parsePositional: (positional, params) => {
+      if (positional[0]) params.name = positional[0];
+    },
+  },
+  {
+    name: "unlock",
+    scope: "fleet",
+    family: "fleet.manage",
+    tool: "fleet.manage.unlock",
+    usage: "unlock <name>",
+    summary: "Release control lock on a bot",
+    requiredParams: ["name"],
+    parsePositional: (positional, params) => {
+      if (positional[0]) params.name = positional[0];
+    },
   },
   {
     name: "use",
@@ -242,55 +274,57 @@ const BOT_COMMANDS: CommandSpec[] = [
     summary: "Read and drain pending directives (--peek to view without draining, --clear to cancel all)",
   },
   {
-    name: "chop",
+    name: "state",
     scope: "bot",
-    family: "task.run",
-    tool: "task.run.chop",
-    usage: "chop [--count N] [--radius N]",
-    summary: "Chop nearest tree(s)",
+    family: "world.observe",
+    tool: "world.observe.state",
+    usage: "state",
+    summary: "Fast lightweight state poll (position, velocity, health, collision, action)",
+    aliases: ["fast_state"],
   },
   {
-    name: "pickup",
+    name: "execute",
     scope: "bot",
     family: "task.run",
-    tool: "task.run.pickup",
-    usage: "pickup [--radius N]",
-    summary: "Pick up nearby items",
+    tool: "task.run.execute",
+    usage: "execute (POST: {code, name?, timeout?})",
+    summary: "Execute arbitrary JS code against the bot",
   },
   {
-    name: "mine",
+    name: "queue",
     scope: "bot",
     family: "task.run",
-    tool: "task.run.mine",
-    usage: "mine <block> [--count N] [--radius N]",
-    summary: "Mine blocks by name",
+    tool: "task.run.queue",
+    usage: "queue [--cancel current|all|<id>]",
+    summary: "View action queue or cancel actions",
+  },
+  {
+    name: "skills",
+    scope: "bot",
+    family: "task.run",
+    tool: "task.run.skills",
+    usage: "skills",
+    summary: "List available code skills",
+  },
+  {
+    name: "load_skill",
+    scope: "bot",
+    family: "task.run",
+    tool: "task.run.load_skill",
+    usage: "load_skill <name>",
+    summary: "Load a skill's code and metadata",
+    requiredParams: ["name"],
     parsePositional: (positional, params) => {
-      if (positional[0]) params.block = positional[0];
+      if (positional[0]) params.name = positional[0];
     },
   },
   {
-    name: "craft",
+    name: "save_skill",
     scope: "bot",
     family: "task.run",
-    tool: "task.run.craft",
-    usage: "craft <item> [--count N]",
-    summary: "Craft an item",
-    requiredParams: ["item"],
-    parsePositional: (positional, params) => {
-      if (positional[0]) params.item = positional[0];
-    },
-  },
-  {
-    name: "smelt",
-    scope: "bot",
-    family: "task.run",
-    tool: "task.run.smelt",
-    usage: "smelt <item> [--count N]",
-    summary: "Smelt an item",
-    requiredParams: ["item"],
-    parsePositional: (positional, params) => {
-      if (positional[0]) params.item = positional[0];
-    },
+    tool: "task.run.save_skill",
+    usage: "save_skill (POST: {name, code, description?})",
+    summary: "Save a code skill",
   },
   {
     name: "place",
@@ -316,22 +350,6 @@ const BOT_COMMANDS: CommandSpec[] = [
       if (!hasDir && !hasCoords) return "need x,y,z or --dir front/back/left/right/up/down";
       return null;
     },
-  },
-  {
-    name: "fight",
-    scope: "bot",
-    family: "task.run",
-    tool: "task.run.fight",
-    usage: "fight [--radius N] [--count N]",
-    summary: "Fight nearby hostile mobs",
-  },
-  {
-    name: "farm",
-    scope: "bot",
-    family: "task.run",
-    tool: "task.run.farm",
-    usage: "farm [--radius N]",
-    summary: "Harvest mature crops and replant",
   },
   {
     name: "goto",

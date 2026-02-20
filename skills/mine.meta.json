@@ -1,0 +1,8 @@
+{
+  "name": "mine",
+  "description": "Mine blocks by name with auto tool equip and drop collection",
+  "lastUsed": "",
+  "successCount": 0,
+  "failCount": 0,
+  "tags": ["gathering", "mining"]
+}

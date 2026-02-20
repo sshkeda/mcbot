@@ -9,18 +9,14 @@ const execFileAsync = promisify(execFile);
 const require = createRequire(import.meta.url);
 const mineflayer = require("mineflayer");
 const pathfinder = require("mineflayer-pathfinder");
-const { GoalNear, GoalFollow } = pathfinder.goals;
+const { GoalNear, GoalFollow, GoalBlock } = pathfinder.goals;
 const Vec3 = require("vec3").Vec3;
 const sharp = require("sharp");
-import { chopNearestTree } from "./tools/chop";
-import { pickupItems } from "./tools/pickup";
-import { mineBlocks } from "./tools/mine";
-import { craftItem } from "./tools/craft";
-import { placeBlock, resolveRelativePos } from "./tools/build";
-import { fightMobs } from "./tools/fight";
-import { farmCrops } from "./tools/farm";
-import { smeltItem, getSmeltOutput } from "./tools/smelt";
 import { withTimeout } from "./lib/utils";
+import { ActionQueue } from "./lib/action-queue";
+import { type ExecuteContext, executeCode } from "./lib/executor";
+import { listSkills, loadSkill, saveSkill } from "./lib/skill-manager";
+import { acquireLock, releaseLock, getLocks, isLocked } from "./lib/locks";
 import { vanillaMeleeAttack } from "./lib/combat";
 import {
   findByTool,
@@ -52,6 +48,7 @@ interface BotInstance {
   version: string;
   chatInbox: ChatMessage[];
   directives: Directive[];
+  actionQueue: ActionQueue;
 }
 
 // ── Activity log ────────────────────────────────────────────────────
@@ -82,13 +79,12 @@ function summarizeResult(command: string, data: any): string {
   if (data.error) return `error: ${data.error}`;
   if (command === "spawn") return `spawned at ${data.x} ${data.y} ${data.z}`;
   if (command === "status") return `hp:${data.health} food:${data.food} pos:${data.position?.x},${data.position?.y},${data.position?.z}`;
-  if (command === "chop") return `chopped ${data.chopped} logs`;
-  if (command === "mine") return `mined ${data.mined} blocks`;
-  if (command === "craft") return data.error ? `failed: ${data.error}` : `crafted ${data.item} x${data.crafted}`;
-  if (command === "smelt") return data.error ? `failed: ${data.error}` : `smelted ${data.item} x${data.smelted}`;
-  if (command === "fight") return `killed ${data.killed} mobs`;
-  if (command === "pickup") return `collected ${data.collected} items`;
-  if (command === "farm") return `harvested ${data.harvested}, replanted ${data.replanted}`;
+  if (command === "execute") return data.success ? `ok (${data.durationMs}ms)` : `error: ${data.error}`;
+  if (command === "queue") return `${data.queue?.length || 0} actions`;
+  if (command === "state") return `pos:${data.position?.x},${data.position?.y},${data.position?.z} hp:${data.health}`;
+  if (command === "skills") return `${data.skills?.length || 0} skills`;
+  if (command === "load_skill") return data.skill?.name || "";
+  if (command === "save_skill") return data.status || "";
   if (command === "goto") return data.status || "";
   if (command === "place") return data.placed ? `placed ${data.block}` : `failed: ${data.error}`;
   if (command === "kill" || command === "killall") return data.status;
@@ -130,7 +126,17 @@ function ensureProfile(name: string) {
 const server = createServer(async (req, res) => {
   const url = new URL(req.url!, `http://localhost:${PORT}`);
   const parts = url.pathname.slice(1).split("/").filter(Boolean);
-  const params = Object.fromEntries(url.searchParams);
+  let params = Object.fromEntries(url.searchParams);
+
+  // Parse POST body (JSON) and merge with query params
+  if (req.method === "POST") {
+    try {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(chunk as Buffer);
+      const body = JSON.parse(Buffer.concat(chunks).toString());
+      params = { ...params, ...body };
+    } catch {}
+  }
 
   const json = (data: any, status = 200) => {
     res.writeHead(status, { "Content-Type": "application/json" });
@@ -255,7 +261,15 @@ function spawnBot(name: string, params: any): Promise<any> {
         return _origGoto(goal);
       };
 
-      const instance: BotInstance = { bot, mcData, name, host: opts.host, port: opts.port, version: bot.version, chatInbox: [], directives: [] };
+      const buildContext = (signal: AbortSignal): ExecuteContext => ({
+        bot, mcData, pathfinder, Vec3,
+        GoalNear, GoalFollow, GoalBlock: pathfinder.goals.GoalBlock,
+        sleep: (ms: number) => new Promise((resolve) => setTimeout(resolve, ms)),
+        signal,
+        log: () => {},
+      });
+      const actionQueue = new ActionQueue(buildContext);
+      const instance: BotInstance = { bot, mcData, name, host: opts.host, port: opts.port, version: bot.version, chatInbox: [], directives: [], actionQueue };
       bots.set(name, instance);
 
       bot.on("chat", (username: string, message: string) => {
@@ -310,15 +324,21 @@ function spawnBot(name: string, params: any): Promise<any> {
 }
 
 function listBots() {
-  const entries = [...bots.entries()].map(([name, inst]) => ({
-    name,
-    status: "ready" as string,
-    position: posOf(inst.bot),
-    health: inst.bot.health,
-    lastCommandAt: lastCommandAt.get(name) || null,
-  }));
+  const locks = getLocks();
+  const lockMap = new Map(locks.map(l => [l.bot, l]));
+  const entries = [...bots.entries()].map(([name, inst]) => {
+    const lock = lockMap.get(name);
+    return {
+      name,
+      status: "ready" as string,
+      position: posOf(inst.bot),
+      health: inst.bot.health,
+      lastCommandAt: lastCommandAt.get(name) || null,
+      lock: lock ? { pid: lock.pid, agent: lock.agent, goal: lock.goal, lockedAt: lock.lockedAt } : null,
+    };
+  });
   for (const name of connecting) {
-    entries.push({ name, status: "connecting", position: { x: 0, y: 0, z: 0 }, health: 0, lastCommandAt: null });
+    entries.push({ name, status: "connecting", position: { x: 0, y: 0, z: 0 }, health: 0, lastCommandAt: null, lock: null });
   }
   return { bots: entries };
 }
@@ -422,6 +442,27 @@ async function runFleetCommand(spec: CommandSpec, params: Record<string, string>
     return result;
   }
   if (spec.name === "tools") return listToolCatalog(params.scope);
+  if (spec.name === "locks") return { locks: getLocks() };
+  if (spec.name === "lock") {
+    const bot = params.name;
+    if (!bot) throw new Error("need name param");
+    const lock = acquireLock(bot, {
+      pid: process.pid,
+      agent: params.agent || "cli",
+      goal: params.goal || "",
+    });
+    if (!lock) {
+      const existing = isLocked(bot);
+      throw new Error(`bot "${bot}" is locked by pid ${existing?.pid} (${existing?.agent || "unknown"})`);
+    }
+    return { status: "locked", lock };
+  }
+  if (spec.name === "unlock") {
+    const bot = params.name;
+    if (!bot) throw new Error("need name param");
+    const released = releaseLock(bot);
+    return { status: released ? "unlocked" : "not locked", bot };
+  }
   if (spec.name === "tool") {
     const target = findByTool("fleet", params.tool || "");
     if (!target || target.name === "tool") {
@@ -534,34 +575,72 @@ async function handleCommand(instance: BotInstance, cmd: string, params: any): P
     };
   }
 
-  if (cmd === "chop") {
-    const count = Number(params.count) || 1;
-    const results = [];
-    for (let i = 0; i < count; i++) {
-      const chopped = await chopNearestTree(bot, pathfinder, Number(params.radius) || 32);
-      if (chopped.length === 0) break;
-      results.push(...chopped);
+  if (cmd === "execute") {
+    const code = params.code;
+    if (!code) return { error: "need code param (POST JSON body with {code, name?, timeout?})" };
+    const name = params.name || "anonymous";
+    const timeout = Number(params.timeout) || 60_000;
+    const action = instance.actionQueue.push(name, code, timeout);
+    return action;
+  }
+  if (cmd === "queue") {
+    if (params.cancel === "current") {
+      const cancelled = instance.actionQueue.cancelCurrent();
+      return { status: cancelled ? "cancelled current" : "nothing running" };
     }
-    return { chopped: results.length, logs: results };
+    if (params.cancel === "all") {
+      const count = instance.actionQueue.clear();
+      return { status: `cancelled ${count} actions` };
+    }
+    if (params.cancel) {
+      const cancelled = instance.actionQueue.cancel(params.cancel);
+      return { status: cancelled ? `cancelled ${params.cancel}` : `action ${params.cancel} not found or already finished` };
+    }
+    return { queue: instance.actionQueue.getState(), current: instance.actionQueue.getCurrent() };
   }
-  if (cmd === "pickup") {
-    const collected = await pickupItems(bot, pathfinder, Number(params.radius) || 40);
-    return { collected: collected.length, inventory: getInventory(bot) };
+  if (cmd === "state") {
+    const p = bot.entity.position;
+    const v = bot.entity.velocity;
+    const current = instance.actionQueue.getCurrent();
+    const pending = instance.actionQueue.getState().filter((a: any) => a.status === "pending").length;
+    return {
+      position: posOf(bot),
+      velocity: { x: +v.x.toFixed(2), y: +v.y.toFixed(2), z: +v.z.toFixed(2) },
+      health: bot.health,
+      food: bot.food,
+      yaw: +bot.entity.yaw.toFixed(2),
+      onGround: bot.entity.onGround,
+      isCollidedHorizontally: bot.entity.isCollidedHorizontally,
+      biome: (() => {
+        const block = bot.blockAt(p);
+        if (!block?.biome) return "unknown";
+        const b = block.biome;
+        const id = typeof b === "object" ? b.id : b;
+        return instance.mcData.biomes?.[id]?.name || `biome:${id}`;
+      })(),
+      time: bot.time.isDay ? "day" : "night",
+      currentAction: current ? { id: current.id, name: current.name, status: current.status } : null,
+      queueLength: pending,
+      inboxCount: instance.chatInbox.length,
+      directiveCount: instance.directives.length,
+    };
   }
-  if (cmd === "mine") {
-    const mined = await mineBlocks(bot, pathfinder, params.block || "stone", {
-      radius: Number(params.radius) || 32,
-      count: Number(params.count) || 1,
-    });
-    return { mined: mined.length, blocks: mined, inventory: getInventory(bot) };
+  if (cmd === "skills") {
+    return { skills: listSkills() };
   }
-  if (cmd === "craft") {
-    const result = await craftItem(bot, pathfinder, params.item || "", Number(params.count) || 1);
-    return { ...result, inventory: getInventory(bot) };
+  if (cmd === "load_skill") {
+    const name = params.name;
+    if (!name) return { error: "need name param" };
+    const skill = loadSkill(name);
+    if (!skill) return { error: `skill "${name}" not found` };
+    return { skill: skill.meta, code: skill.code };
   }
-  if (cmd === "smelt") {
-    const result = await smeltItem(bot, pathfinder, params.item || "", Number(params.count) || 1);
-    return { ...result, inventory: getInventory(bot) };
+  if (cmd === "save_skill") {
+    const name = params.name;
+    const code = params.code;
+    if (!name || !code) return { error: "need name and code params (POST JSON body)" };
+    saveSkill(name, code, { description: params.description || "" });
+    return { status: "saved", name };
   }
   if (cmd === "place") {
     let { x, y, z } = params;
@@ -571,19 +650,26 @@ async function handleCommand(instance: BotInstance, cmd: string, params: any): P
       x = String(pos.x); y = String(pos.y); z = String(pos.z);
     }
     if (!x || !y || !z) return { error: "need x,y,z or --dir front/back/left/right/up/down" };
-    const result = await placeBlock(bot, pathfinder, params.block || "cobblestone", Number(x), Number(y), Number(z));
-    return result;
-  }
-  if (cmd === "fight") {
-    const killed = await fightMobs(bot, pathfinder, {
-      radius: Number(params.radius) || 16,
-      count: Number(params.count) || 10,
-    });
-    return { killed: killed.length, mobs: killed };
-  }
-  if (cmd === "farm") {
-    const result = await farmCrops(bot, pathfinder, Number(params.radius) || 16);
-    return result;
+    const blockName = params.block || "cobblestone";
+    const item = bot.inventory.items().find((i: any) => i.name === blockName);
+    if (!item) return { error: `no ${blockName} in inventory` };
+    const targetPos = new Vec3(Number(x), Number(y), Number(z));
+    try {
+      await withTimeout(bot.pathfinder.goto(new GoalNear(targetPos.x, targetPos.y, targetPos.z, 4)), 15000);
+    } catch (err: any) {
+      bot.pathfinder.stop();
+      return { error: `can't reach target: ${err.message}` };
+    }
+    await bot.equip(item, "hand");
+    const refBlock = bot.blockAt(targetPos.offset(0, -1, 0)) || bot.blockAt(targetPos.offset(0, 0, -1));
+    if (!refBlock) return { error: "no reference block to place against" };
+    const faceVec = targetPos.minus(refBlock.position);
+    try {
+      await bot.placeBlock(refBlock, faceVec);
+      return { placed: true, block: blockName, position: { x: targetPos.x, y: targetPos.y, z: targetPos.z } };
+    } catch (err: any) {
+      return { placed: false, error: err.message };
+    }
   }
   if (cmd === "goto") {
     const { x, y, z } = params;
@@ -1034,6 +1120,29 @@ async function handleCommand(instance: BotInstance, cmd: string, params: any): P
 }
 
 // --- Helpers ---
+
+const DIRECTIONS: Record<string, [number, number, number]> = {
+  front: [0, 0, -1], back: [0, 0, 1],
+  left: [1, 0, 0], right: [-1, 0, 0],
+  up: [0, 1, 0], down: [0, -1, 0],
+};
+
+function resolveRelativePos(bot: any, dir: string): { x: number; y: number; z: number } | null {
+  const d = DIRECTIONS[dir];
+  if (!d) return null;
+  const p = bot.entity.position;
+  const yaw = bot.entity.yaw;
+  const sin = Math.sin(yaw);
+  const cos = Math.cos(yaw);
+  // Rotate the direction vector by the bot's yaw
+  const rx = Math.round(d[0] * cos - d[2] * sin);
+  const rz = Math.round(d[0] * sin + d[2] * cos);
+  return {
+    x: Math.floor(p.x) + rx,
+    y: Math.floor(p.y) + d[1],
+    z: Math.floor(p.z) + rz,
+  };
+}
 
 function posOf(bot: any) {
   const p = bot.entity.position;

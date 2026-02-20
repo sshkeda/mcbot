@@ -319,7 +319,10 @@ Use task tracking tools to keep the user informed:
   process.exit(0);
 }
 
-const qs = new URLSearchParams(params).toString();
+const POST_COMMANDS = new Set(["execute", "save_skill"]);
+const needsPost = POST_COMMANDS.has(spec.name);
+
+const qs = needsPost ? "" : new URLSearchParams(params).toString();
 const url = scope === "fleet"
   ? `${API}/${spec.name}${qs ? `?${qs}` : ""}`
   : `${API}/${botName}/${spec.name}${qs ? `?${qs}` : ""}`;
@@ -345,6 +348,7 @@ function formatOutput(command: string, data: any): void {
           console.log(`  ${b.name}  (connecting...)`);
         } else {
           let line = `  ${b.name}  pos: ${b.position.x} ${b.position.y} ${b.position.z}  hp: ${b.health}`;
+          if (b.lock) line += `  \x1b[33m🔒 ${b.lock.agent || "locked"}\x1b[0m`;
           if (b.lastCommandAt) {
             const ago = Math.round((now - b.lastCommandAt) / 1000);
             if (ago < 30) line += `  \x1b[32m● active (${ago}s ago)\x1b[0m`;
@@ -428,39 +432,71 @@ function formatOutput(command: string, data: any): void {
     }
     return;
   }
-  if (command === "chop") {
-    console.log(`chopped ${data.chopped} logs`);
+  if (command === "execute") {
+    console.log(`[${data.id}] ${data.name} — ${data.status}`);
+    if (data.status === "done" && data.result !== undefined) console.log(`  result: ${JSON.stringify(data.result)}`);
+    if (data.error) console.log(`  error: ${data.error}`);
+    if (data.logs?.length) for (const l of data.logs) console.log(`  > ${l}`);
     return;
   }
-  if (command === "pickup") {
-    console.log(`collected ${data.collected} items`);
+  if (command === "queue") {
+    if (data.status) { console.log(data.status); return; }
+    const q = data.queue || [];
+    if (q.length === 0) { console.log("(queue empty)"); return; }
+    for (const a of q) {
+      const dur = a.finishedAt && a.startedAt ? `${new Date(a.finishedAt).getTime() - new Date(a.startedAt).getTime()}ms` : "";
+      console.log(`  [${a.status.padEnd(9)}] ${a.name} ${dur}`);
+      if (a.error) console.log(`           error: ${a.error}`);
+    }
+    if (data.current) console.log(`\ncurrent: ${data.current.name} (${data.current.id})`);
     return;
   }
-  if (command === "mine") {
-    console.log(`mined ${data.mined} blocks: ${data.blocks.join(", ") || "none"}`);
+  if (command === "state") {
+    const p = data.position;
+    const v = data.velocity;
+    let line = `pos: ${p.x} ${p.y} ${p.z}  vel: ${v.x} ${v.y} ${v.z}  hp: ${data.health}  food: ${data.food}`;
+    if (data.isCollidedHorizontally) line += "  COLLIDED";
+    if (!data.onGround) line += "  AIRBORNE";
+    console.log(line);
+    if (data.currentAction) console.log(`action: ${data.currentAction.name} (${data.currentAction.status})`);
+    console.log(`queue: ${data.queueLength} pending  inbox: ${data.inboxCount}  directives: ${data.directiveCount}  ${data.time}  ${data.biome}`);
     return;
   }
-  if (command === "craft") {
-    if (data.error) console.log(`craft failed: ${data.error}`);
-    else console.log(`crafted ${data.item} x${data.crafted}`);
+  if (command === "skills") {
+    const skills = data.skills || [];
+    if (skills.length === 0) { console.log("(no skills)"); return; }
+    for (const s of skills) console.log(`  ${s.name.padEnd(20)} ${s.description}`);
     return;
   }
-  if (command === "smelt") {
-    if (data.error) console.log(`smelt failed: ${data.error}`);
-    else console.log(`smelted ${data.item} x${data.smelted}`);
+  if (command === "load_skill") {
+    console.log(`--- ${data.skill.name} ---`);
+    if (data.skill.description) console.log(`# ${data.skill.description}`);
+    console.log(data.code);
+    return;
+  }
+  if (command === "save_skill") {
+    console.log(`saved skill: ${data.name}`);
+    return;
+  }
+  if (command === "locks") {
+    const locks = data.locks || [];
+    if (locks.length === 0) { console.log("(no locks)"); return; }
+    for (const l of locks) {
+      console.log(`  ${l.bot.padEnd(16)} pid:${l.pid} agent:${l.agent || "?"} goal:${l.goal || "-"} since:${l.lockedAt.slice(11, 19)}`);
+    }
+    return;
+  }
+  if (command === "lock") {
+    console.log(`locked ${data.lock.bot} (pid:${data.lock.pid})`);
+    return;
+  }
+  if (command === "unlock") {
+    console.log(data.status);
     return;
   }
   if (command === "place") {
     if (data.placed) console.log(`placed ${data.block} at ${data.position.x} ${data.position.y} ${data.position.z}`);
     else console.log(`place failed: ${data.error}`);
-    return;
-  }
-  if (command === "fight") {
-    console.log(`killed ${data.killed} mobs: ${data.mobs.join(", ") || "none"}`);
-    return;
-  }
-  if (command === "farm") {
-    console.log(`harvested ${data.harvested}, replanted ${data.replanted}`);
     return;
   }
   if (command === "give") {
@@ -566,7 +602,10 @@ function formatOutput(command: string, data: any): void {
 }
 
 try {
-  const res = await fetch(url);
+  const fetchOpts: RequestInit = needsPost
+    ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(params) }
+    : {};
+  const res = await fetch(url, fetchOpts);
   const data: any = await res.json();
 
   if (!res.ok || data.error) {

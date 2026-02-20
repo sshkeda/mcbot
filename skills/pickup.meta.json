@@ -1,0 +1,8 @@
+{
+  "name": "pickup",
+  "description": "Collect nearby dropped items on the ground",
+  "lastUsed": "",
+  "successCount": 0,
+  "failCount": 0,
+  "tags": ["gathering", "items"]
+}

@@ -15,8 +15,22 @@ bun run cli.ts killall
 
 # Bot commands (always: bun run cli.ts <botName> <command>)
 bun run cli.ts Scout status
-bun run cli.ts Scout mine iron_ore --count 10
+bun run cli.ts Scout state           # fast poll (position, velocity, collision)
+bun run cli.ts Scout survey          # scan area for resources
 bun run cli.ts Scout screenshot --radius 64
+
+# Code execution (orchestrator writes JS code)
+curl -X POST http://localhost:3847/Scout/execute \
+  -H 'Content-Type: application/json' \
+  -d '{"code": "log(bot.entity.position); return bot.health", "name": "test"}'
+bun run cli.ts Scout queue           # view action queue
+bun run cli.ts Scout skills          # list available skills
+bun run cli.ts Scout load_skill chop # load skill code
+
+# Cross-terminal locking
+bun run cli.ts locks                 # show all bot locks
+bun run cli.ts lock Scout --agent orchestrator --goal "mining"
+bun run cli.ts unlock Scout
 
 # Bot profiles
 bun run cli.ts profile Scout              # view profile
@@ -33,8 +47,11 @@ bun run cli.ts profile Scout --memory "found village at 350 68 -120"
 
 See `.claude/skills/mcbot/SKILL.md` for the complete reference:
 - All fleet and bot commands
-- Orchestrator/worker subagent architecture
-- Directive system (`direct`, `--interrupt`, `--peek`, `--clear`)
+- Single orchestrator architecture (writes JS code, executes via `execute` endpoint)
+- Code execution context (bot, mcData, pathfinder, Vec3, sleep, signal, log)
+- Action queue management (push, cancel, view)
+- Skill system (load, save, reuse code templates)
+- Cross-terminal bot locking
 - Visual commands (screenshot, pov, render, map)
 - Bot profiles and personality system
 
@@ -43,8 +60,12 @@ See `.claude/skills/mcbot/SKILL.md` for the complete reference:
 - `server.ts` — HTTP API server, manages multiple bot instances
 - `cli.ts` — CLI that talks to the server via HTTP
 - `lib/commands.ts` — shared command/tool registry (help, parsing, validation, routing)
+- `lib/executor.ts` — code execution engine (AsyncFunction + AbortController)
+- `lib/action-queue.ts` — per-bot sequential action queue
+- `lib/skill-manager.ts` — load/save skills from `skills/` directory
+- `lib/locks.ts` — cross-terminal bot locking via `/tmp/mcbot-locks/`
+- `skills/` — reusable JS code templates (chop, mine, craft, smelt, pickup, fight, farm, build, goto)
 - `render.cjs` — Node-only headless 3D renderer (uses gl/THREE.js, incompatible with Bun)
-- `tools/` — bot tools (chop, pickup, mine, craft, build, fight, farm)
 - `mcbots/` — bot profiles (personality, memories, metadata per bot)
 - `.claude/skills/mcbot/SKILL.md` — `/mcbot` slash command (subagent launcher + dashboard)
 
