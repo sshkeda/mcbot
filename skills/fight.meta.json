@@ -1,8 +1,0 @@
-{
-  "name": "fight",
-  "description": "Fight nearby hostile mobs with auto weapon equip",
-  "lastUsed": "",
-  "successCount": 0,
-  "failCount": 0,
-  "tags": ["combat"]
-}

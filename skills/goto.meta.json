@@ -1,8 +1,0 @@
-{
-  "name": "goto",
-  "description": "Navigate to x y z coordinates using pathfinder",
-  "lastUsed": "",
-  "successCount": 0,
-  "failCount": 0,
-  "tags": ["navigation", "movement"]
-}

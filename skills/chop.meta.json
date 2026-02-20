@@ -1,8 +1,0 @@
-{
-  "name": "chop",
-  "description": "Find nearest tree, chop it down, collect dropped logs",
-  "lastUsed": "",
-  "successCount": 0,
-  "failCount": 0,
-  "tags": ["gathering", "wood"]
-}

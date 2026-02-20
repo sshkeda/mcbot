@@ -17,6 +17,8 @@ export interface ExecuteContext {
   sleep: (ms: number) => Promise<void>;
   signal: AbortSignal;
   log: (...args: any[]) => void;
+  /** Shared navigation engine — injected by buildContext, wrapped by executor to capture logs. */
+  goto?: (...args: any[]) => Promise<any>;
 }
 
 export interface ExecuteResult {
@@ -82,31 +84,17 @@ export async function executeCode(
     log: logFn,
   };
 
-  // When signal fires, stop pathfinder + digging as side effects
-  const onAbort = () => {
-    try {
-      ctx.bot.pathfinder?.stop();
-    } catch {}
-    try {
-      ctx.bot.stopDigging?.();
-    } catch {}
-    try {
-      // Release all movement controls
-      for (const key of ["forward", "back", "left", "right", "jump", "sprint", "sneak"]) {
-        ctx.bot.setControlState?.(key, false);
-      }
-    } catch {}
-  };
-  ctx.signal.addEventListener("abort", onAbort, { once: true });
-
-  const paramNames = Object.keys(execCtx);
-  const paramValues = Object.values(execCtx);
+  // Wrap goto so skill code can call goto(x, y, z, opts) — log is auto-injected
+  if (ctx.goto) {
+    const _baseGoto = ctx.goto;
+    execCtx.goto = (x: number, y: number, z: number, opts?: any) =>
+      _baseGoto(x, y, z, opts, logFn);
+  }
 
   let fn: (...args: any[]) => Promise<any>;
   try {
-    fn = new AsyncFunction(...paramNames, code);
+    fn = new AsyncFunction(...Object.keys(execCtx), code);
   } catch (err: any) {
-    ctx.signal.removeEventListener("abort", onAbort);
     return {
       success: false,
       result: null,
@@ -116,20 +104,46 @@ export async function executeCode(
     };
   }
 
+  // Create a local AbortController that chains the parent signal.
+  // This lets us abort on timeout (the parent AC may not be ours to abort).
+  const localAc = new AbortController();
+  const chainParent = () => { if (!localAc.signal.aborted) localAc.abort(); };
+  if (ctx.signal.aborted) localAc.abort();
+  else ctx.signal.addEventListener("abort", chainParent, { once: true });
+
+  // When local signal fires (timeout or parent cancel), stop bot actions
+  const onAbort = () => {
+    try { ctx.bot.pathfinder?.stop(); } catch {}
+    try { ctx.bot.stopDigging?.(); } catch {}
+    try {
+      for (const key of ["forward", "back", "left", "right", "jump", "sprint", "sneak"]) {
+        ctx.bot.setControlState?.(key, false);
+      }
+    } catch {}
+  };
+  localAc.signal.addEventListener("abort", onAbort, { once: true });
+
+  // Re-wire context to use local signal
+  const localCtx: ExecuteContext = { ...execCtx, signal: localAc.signal, sleep: makeAbortableSleep(localAc.signal) };
+
+  // Rewrap goto to use the local signal so timeouts propagate to navigation
+  if (ctx.goto) {
+    const _baseGoto = ctx.goto;
+    localCtx.goto = (x: number, y: number, z: number, opts?: any) =>
+      _baseGoto(x, y, z, opts, logFn, localAc.signal);
+  }
+
+  const localParamValues = Object.values(localCtx);
+
   const t0 = Date.now();
 
-  // Timeout: abort the signal and reject
+  // Timeout: abort the local controller so the code actually stops
   const timeoutId = setTimeout(() => {
-    // If the caller provided their own AbortController, we can't abort it
-    // from here. Instead we just let the race reject with a timeout error.
+    if (!localAc.signal.aborted) localAc.abort();
   }, timeoutMs);
 
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    setTimeout(() => reject(new Error(`timeout after ${timeoutMs}ms`)), timeoutMs);
-  });
-
   try {
-    const result = await Promise.race([fn(...paramValues), timeoutPromise]);
+    const result = await fn(...localParamValues);
 
     // Serialize result — drop non-JSON-safe values
     let safeResult: any;
@@ -141,20 +155,23 @@ export async function executeCode(
 
     return { success: true, result: safeResult, logs, durationMs: Date.now() - t0 };
   } catch (err: any) {
+    const msg = err.message || String(err);
+    // Distinguish timeout from other errors
+    const isTimeout = localAc.signal.aborted && !ctx.signal.aborted;
     return {
       success: false,
       result: null,
       logs,
-      error: err.message || String(err),
+      error: isTimeout ? `timeout after ${timeoutMs}ms` : msg,
       durationMs: Date.now() - t0,
     };
   } finally {
     clearTimeout(timeoutId);
-    ctx.signal.removeEventListener("abort", onAbort);
+    ctx.signal.removeEventListener("abort", chainParent);
+    // Abort local signal to stop any lingering async code
+    if (!localAc.signal.aborted) localAc.abort();
     // Cleanup: stop pathfinder and release controls between actions
-    try {
-      ctx.bot.pathfinder?.stop();
-    } catch {}
+    try { ctx.bot.pathfinder?.stop(); } catch {}
     try {
       for (const key of ["forward", "back", "left", "right", "jump", "sprint", "sneak"]) {
         ctx.bot.setControlState?.(key, false);

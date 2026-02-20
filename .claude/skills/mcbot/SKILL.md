@@ -23,7 +23,7 @@ Look at `$ARGUMENTS` and pick one of two modes:
 
 Show all active bots and recent activity.
 
-1. Run both commands from `/srv/blockgame-server`:
+1. Run both commands from `the project root`:
 
    ```
    bun run cli.ts list
@@ -48,7 +48,7 @@ Spawn **one** Claude Code orchestrator subagent to control a bot autonomously. T
 
 ### Step 1: Get bot context
 
-Run from `/srv/blockgame-server`:
+Run from `the project root`:
 ```
 bun run cli.ts <bot-name> status
 bun run cli.ts <bot-name> inventory
@@ -60,7 +60,7 @@ If the bot doesn't exist, tell the user to spawn it first: `bun run cli.ts spawn
 ### Step 2: Read the bot's SOUL.md (if it exists)
 
 ```
-Read /srv/blockgame-server/mcbots/<bot-name>/SOUL.md
+Read the project root/mcbots/<bot-name>/SOUL.md
 ```
 
 ### Step 3: Acquire lock
@@ -110,11 +110,14 @@ log(...args) — capture output (returned in logs array)
 
 ### Executing Code
 
-Submit code via POST to the execute endpoint:
+Submit code via POST to the execute endpoint. **ALWAYS use a heredoc** to avoid JSON escaping issues:
 ```bash
-curl -X POST http://localhost:3847/<BOT>/execute \
+curl -s -X POST http://localhost:3847/<BOT>/execute \
   -H 'Content-Type: application/json' \
-  -d '{"code": "JS_CODE_HERE", "name": "action-label", "timeout": 60000}'
+  -d "$(cat <<'PAYLOAD'
+{"code": "JS_CODE_HERE", "name": "action-label", "timeout": 60000}
+PAYLOAD
+)"
 ```
 
 Or via CLI:
@@ -122,11 +125,11 @@ Or via CLI:
 bun run cli.ts <BOT> execute  # (uses stdin for POST body)
 ```
 
-The code is queued and executed sequentially. The response includes the action ID and status.
+The code is queued and executed sequentially. The response includes the action ID and status. **Queue multiple actions per turn** when the next steps are predictable — they execute in order.
 
 ### Observation Commands (via CLI)
 
-Run these from `/srv/blockgame-server` using Bash:
+Run these from `the project root` using Bash:
 
 | Command | What it does |
 |---------|-------------|
@@ -158,38 +161,94 @@ When you write useful, reusable code, save it as a skill:
 ```bash
 curl -X POST http://localhost:3847/<BOT>/save_skill \
   -H 'Content-Type: application/json' \
-  -d '{"name": "skill_name", "code": "JS_CODE", "description": "what it does"}'
+  -d '{"name": "skill_name", "code": "JS_CODE", "description": "what it does", "tags": "gathering,wood"}'
 ```
 
-## Core Loop
+Skills are stored as `.ts` files in `skills/` with a JSDoc metadata header (`@skill`, `@description`, `@tags`). The code itself must be plain JavaScript (no TypeScript syntax, no imports) since it runs via `new AsyncFunction(...)`.
 
-Repeat this loop continuously:
+## Pre-Goal Planning (MANDATORY)
 
-1. **Poll state** (every 2-3 seconds):
-   ```bash
-   bun run cli.ts <BOT> state
-   ```
-   Check: position, velocity, health, collision, current action, queue length, inbox count.
+Before your first action, run a prerequisite checklist. Do NOT skip this — bad tool state causes pathfinder failures and wasted time.
 
-2. **Handle inbox** (if inboxCount > 0):
-   - Read messages: `bun run cli.ts <BOT> inbox`
-   - Respond in character via `chat`
-   - If player asks bot to do something, adjust your goal accordingly
+### Checklist
 
-3. **Detect stuck bot** (if action running and position unchanged for >10s, or isCollidedHorizontally for >5s):
-   - Cancel current action: `bun run cli.ts <BOT> queue --cancel current`
-   - Write recovery code (see Stuck Recovery below)
+1. **Tools**: Does the goal require specific tools? (mining/underground → pickaxe, chopping → axe, digging → shovel, farming → hoe). Check inventory. If missing, generate subgoals: gather materials → craft tool → equip.
+2. **Materials**: Will you need building blocks, torches, crafting table, furnace? Gather/craft them first.
+3. **Food**: If food bar is below 8 (16 hunger points), find food before starting combat or long trips.
+4. **Light**: Going underground? Craft torches (coal + sticks) before descending.
+5. **Access/Safety**: Is the target reachable? Do you need to bridge, pillar, or clear a path? Is it near lava/void?
 
-4. **Handle failures** (if action failed):
-   - Read the error from queue state
-   - Analyze what went wrong
-   - Write corrected code and execute
+If ANY prerequisite is missing, resolve it before moving toward the main goal. These become subgoals executed in order:
+```
+Goal: "go underground and mine iron"
+→ Subgoal 1: Gather 6 logs (for planks, sticks, crafting table)
+→ Subgoal 2: Craft crafting table, wooden pickaxe
+→ Subgoal 3: Craft torches (if coal available)
+→ Subgoal 4: Equip pickaxe in hand
+→ Subgoal 5: NOW dig down / pathfind to cave
+```
 
-5. **Plan and execute** (if queue empty):
-   - Decide next step toward your goal
-   - Use `survey` to find resources, `look` for nearby entities
-   - Write JS code for the next action
-   - Execute it
+### Replan guardrail
+
+If a prerequisite subgoal fails **3 times**, stop retrying and replan:
+- Try an alternative resource source (different location, different material tier)
+- Change approach (surface mining instead of caving, find a village chest, etc.)
+- If completely stuck, report the blocker and ask for player help via chat
+
+## Pathfinder Tool Awareness (CRITICAL)
+
+The pathfinder decides which blocks it can break based on the bot's **currently equipped hand item** — NOT just what's in inventory.
+
+**Hard rules:**
+- Before ANY `pathfinder.goto()` where digging may be required, equip the correct tool in hand.
+- After crafting a new tool, ALWAYS re-equip before retrying navigation.
+- If pathfinder fails or takes an absurd route, check: is the right tool equipped?
+
+```javascript
+// ALWAYS do this before pathfinding underground or through stone
+const pick = bot.inventory.items().find(i => i.name.includes('pickaxe'));
+if (pick) await bot.equip(pick, 'hand');
+// NOW pathfinder knows it can break stone/ore
+await bot.pathfinder.goto(new GoalBlock(x, y, z));
+```
+
+Without a pickaxe equipped, pathfinder treats stone as impassable and will either fail or route around it entirely — leading to absurd detours.
+
+## Core Loop (AGGRESSIVE — every turn must make progress)
+
+You are RELENTLESSLY AGGRESSIVE. Never hesitate. Never passively observe. Every single turn must advance the goal.
+
+### Turn structure
+
+1. **Batch observations in parallel.** Run `state` + `inventory` (+ `look`/`queue` if needed) in a SINGLE turn using parallel Bash calls. Never waste a turn on one observation.
+
+2. **Act in the SAME turn as observation.** After reading state, immediately submit the next action. Never end a turn with just observations.
+
+3. **Queue multiple actions when dependencies allow.** The action queue executes sequentially. If you know the next 2-3 steps (e.g., chop → craft → equip), submit them ALL as separate curl calls in one turn. Only fall back to single-step when a step is truly state-dependent.
+
+4. **One poll, then act.** Poll state once to check progress. If the bot is moving and healthy, poll again in 5s. If ANYTHING is wrong, act IMMEDIATELY — don't poll a second time to "confirm."
+
+5. **Never poll an empty queue.** If queue is empty, submit the next action instead of polling.
+
+### Stuck Detection (ZERO TOLERANCE)
+- Position unchanged for 2 consecutive polls (~10s): **cancel + recover in the SAME turn.**
+- `isCollidedHorizontally` appears even once: **cancel + recover immediately.**
+- Recovery = cancel current action + submit new code that works around the obstacle. Both in the same turn.
+
+### Failure Recovery
+- Action failed → **read error + submit corrected code in the SAME turn.** Never just poll after a failure.
+- Same approach fails twice → **change strategy entirely.** Don't retry the same code a third time.
+- Timeout → code was too ambitious. Break into smaller steps.
+
+### Inbox
+- If inboxCount > 0: read messages, respond in character via `chat`, adjust goal if player requests something.
+
+### Pathfinder timeout fallback ladder
+When pathfinder says "Took to long to decide path":
+1. Retry with smaller radius (maxDistance: 16 → 8)
+2. If still fails, reposition: walk 10 blocks in a random direction, rescan
+3. Blacklist the unreachable target position, try the next nearest
+4. Keep goals quantity-based ("need X logs"), not target-based ("this specific tree")
 
 ## Writing Code: Patterns
 
@@ -254,6 +313,26 @@ for (let i = 0; i < 10; i++) {
 }
 ```
 
+## Block Placement / Crafting Table Idempotency
+
+`placeBlock` may throw "blockUpdate did not fire within timeout" even when the block WAS placed (event lag). This is ambiguous, not a hard failure. Always verify before retrying:
+
+```javascript
+// After a placeBlock timeout, check if it actually worked:
+// 1. Is the item gone from inventory?
+const tableInInv = bot.inventory.items().find(i => i.name === 'crafting_table');
+// 2. Is the block in the world?
+const tableId = mcData.blocksByName.crafting_table.id;
+const found = bot.findBlocks({ matching: tableId, maxDistance: 4, count: 1 });
+if (!tableInInv || found.length > 0) {
+  log('table was placed despite timeout, continuing');
+} else {
+  log('placement truly failed, retrying');
+}
+```
+
+Apply this pattern to ANY block placement that times out. Check inventory delta + world scan before retrying.
+
 ## Stuck Recovery Patterns
 
 When the bot is stuck:
@@ -315,14 +394,19 @@ If commands fail with "not found" or "disconnected":
 
 ## Rules
 
-- **ALWAYS use Bash** to run commands from `/srv/blockgame-server`
-- **Poll state frequently** — every 2-3 seconds when actions are running
+- **ALWAYS use Bash** to run commands from `the project root`
+- **Every turn must make progress.** Observe AND act in the same turn. Never end a turn with just observations.
+- **Batch observations in parallel** — run state + inventory + look as parallel Bash calls, not sequential turns.
+- **Queue multiple actions** when the next 2-3 steps are predictable (they execute sequentially).
+- **Poll state every ~5s** while actions run. Use `bun run cli.ts <BOT> poll --timeout 5000`.
+- **Never poll an empty queue** — submit the next action instead.
 - **Write focused code** — each execute should do ONE thing (find + mine, or craft, or navigate)
 - **Check signal.aborted** in loops to support cancellation
 - **Use log()** in execute code instead of console.log — logs are captured and returned
+- **Use heredocs for curl payloads** to avoid JSON escaping issues
 - **Save useful code as skills** for reuse
 - After running pov or render, use Read tool to view the PNG file
-- Be efficient with turns — batch independent observations in parallel
+- **NEVER block on long-running actions** — after every execute, immediately begin polling. Silent waiting leads to missed failures and stuck bots.
 ```
 
 ### Step 5: Report

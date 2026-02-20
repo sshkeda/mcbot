@@ -299,6 +299,14 @@ const BOT_COMMANDS: CommandSpec[] = [
     summary: "View action queue or cancel actions",
   },
   {
+    name: "poll",
+    scope: "bot",
+    family: "task.run",
+    tool: "task.run.poll",
+    usage: "poll [--timeout N]",
+    summary: "Long-poll: blocks up to 15s, returns early when an action finishes. Full snapshot.",
+  },
+  {
     name: "skills",
     scope: "bot",
     family: "task.run",

@@ -25,9 +25,12 @@ export type ActionView = Omit<QueuedAction, never>;
 
 const HISTORY_MAX = 20;
 
+type ActionEntry = QueuedAction & { _ac?: AbortController; _waiters?: ((view: ActionView) => void)[] };
+
 export class ActionQueue {
-  private queue: (QueuedAction & { _ac?: AbortController })[] = [];
+  private queue: ActionEntry[] = [];
   private processing = false;
+  private _onFinish: (() => void)[] = [];
 
   /**
    * buildContext is called at execution time to get a fresh ExecuteContext
@@ -108,8 +111,64 @@ export class ActionQueue {
     return current ? this.viewOf(current) : null;
   }
 
-  private viewOf(a: QueuedAction & { _ac?: AbortController }): ActionView {
-    const { _ac, ...view } = a;
+  /** Get actions that finished since lastPollAt (done/failed/cancelled). */
+  getCompletedSince(lastPollAt: string | null): ActionView[] {
+    return this.queue
+      .filter((a) => {
+        if (a.status !== "done" && a.status !== "failed" && a.status !== "cancelled") return false;
+        if (!a.finishedAt) return false;
+        if (!lastPollAt) return true;
+        return a.finishedAt > lastPollAt;
+      })
+      .map((a) => this.viewOf(a));
+  }
+
+  /** Block until action completes. Returns the final action view, or null if not found. */
+  waitFor(actionId: string, timeoutMs = 120_000): Promise<ActionView | null> {
+    const action = this.queue.find((a) => a.id === actionId);
+    if (!action) return Promise.resolve(null);
+    if (action.status === "done" || action.status === "failed" || action.status === "cancelled") {
+      return Promise.resolve(this.viewOf(action));
+    }
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        resolve(this.viewOf(action));
+      }, timeoutMs);
+      if (!action._waiters) action._waiters = [];
+      action._waiters.push((view) => {
+        clearTimeout(timer);
+        resolve(view);
+      });
+    });
+  }
+
+  /** Returns a promise that resolves when any action finishes, or after timeoutMs (max 15s). */
+  waitAny(timeoutMs = 5_000): Promise<void> {
+    timeoutMs = Math.min(timeoutMs, 15_000);
+    // If nothing is running or pending, resolve immediately
+    const hasActive = this.queue.some((a) => a.status === "running" || a.status === "pending");
+    if (!hasActive) return Promise.resolve();
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        const idx = this._onFinish.indexOf(cb);
+        if (idx >= 0) this._onFinish.splice(idx, 1);
+        resolve();
+      }, timeoutMs);
+      const cb = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      this._onFinish.push(cb);
+    });
+  }
+
+  private notifyFinish() {
+    const cbs = this._onFinish.splice(0);
+    for (const cb of cbs) cb();
+  }
+
+  private viewOf(a: ActionEntry): ActionView {
+    const { _ac, _waiters, ...view } = a;
     return view;
   }
 
@@ -141,6 +200,9 @@ export class ActionQueue {
         const ctx = this.buildContext(ac.signal);
         const result: ExecuteResult = await executeCode(next.code, ctx, next.timeoutMs);
 
+        // Abort lingering async code from timed-out/failed actions
+        if (!ac.signal.aborted) ac.abort();
+
         next.logs = result.logs;
         next.finishedAt = new Date().toISOString();
 
@@ -156,6 +218,12 @@ export class ActionQueue {
         }
 
         next._ac = undefined; // cleanup
+        if (next._waiters) {
+          const view = this.viewOf(next);
+          for (const cb of next._waiters) cb(view);
+          next._waiters = undefined;
+        }
+        this.notifyFinish();
       }
     } finally {
       this.processing = false;
