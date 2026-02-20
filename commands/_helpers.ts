@@ -38,6 +38,7 @@ export interface BotInstance {
   host: string;
   port: number;
   version: string;
+  worldPath?: string;
   chatInbox: ChatMessage[];
   directives: Directive[];
   actionQueue: ActionQueue;

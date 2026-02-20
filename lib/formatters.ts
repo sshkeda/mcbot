@@ -118,6 +118,14 @@ export function formatOutput(command: string, data: any): void {
     return;
   }
   if (command === "state") {
+    // ── Chat & directives FIRST so LLM agents can't miss them ──
+    if (data.directives?.length > 0) {
+      for (const d of data.directives) console.log(`  ATTN_DIRECTIVE: ${d.text}`);
+    }
+    if (data.inbox?.length > 0) {
+      for (const m of data.inbox) console.log(`  ATTN_CHAT: <${m.sender}> ${m.message}`);
+    }
+    // ── Standard state ──
     const p = data.position;
     const v = data.velocity;
     let line = `[${data.ts?.slice(11, 19)}] pos: ${p.x} ${p.y} ${p.z}  vel: ${v.x} ${v.y} ${v.z}  hp: ${data.health}  food: ${data.food}  ${data.time}  ${data.biome}`;
@@ -138,12 +146,6 @@ export function formatOutput(command: string, data: any): void {
         if (a.logs?.length) for (const l of a.logs) console.log(`    > ${l}`);
         if (a.error) console.log(`    ! ${a.error}`);
       }
-    }
-    if (data.inbox?.length > 0) {
-      for (const m of data.inbox) console.log(`  chat: <${m.sender}> ${m.message}`);
-    }
-    if (data.directives?.length > 0) {
-      for (const d of data.directives) console.log(`  directive: ${d.text}`);
     }
     return;
   }
@@ -273,8 +275,86 @@ export function formatOutput(command: string, data: any): void {
     }
     return;
   }
-  if (command === "pov" || command === "render") {
+  if (command === "render") {
     console.log(data.file);
+    return;
+  }
+  if (command === "snapshot") {
+    if (data.error) { console.log(`snapshot error: ${data.error}`); return; }
+    console.log(`snapshot ${data.from.x},${data.from.y},${data.from.z} → ${data.to.x},${data.to.y},${data.to.z}  vol: ${data.volume}  filled: ${data.filled}  air: ${data.air}  unknown: ${data.unknown}`);
+    if (data.counts && Object.keys(data.counts).length > 0) {
+      console.log("  blocks:");
+      for (const [name, count] of Object.entries(data.counts)) console.log(`    ${name}: ${count}`);
+    }
+    if (data.layerMaps) console.log("\n" + data.layerMaps);
+    if (data.blueprint) {
+      const bp = data.blueprint;
+      console.log(`  blueprint "${bp.name}": ${bp.progress}  (missing: ${bp.missing}, wrong: ${bp.wrong})`);
+      if (bp.next?.length > 0) {
+        console.log("  next placements:");
+        for (const n of bp.next.slice(0, 10)) {
+          console.log(`    ${n.expected} at ${n.x} ${n.y} ${n.z} ${n.hasSupport ? "(supported)" : "(unsupported)"} ${n.dist}m`);
+        }
+      }
+    }
+    return;
+  }
+  if (command === "orbit") {
+    if (data.error) { console.log(`orbit error: ${data.error}`); return; }
+    for (const f of data.files) console.log(f);
+    if (data.errors?.length > 0) {
+      for (const e of data.errors) console.log(`  error: ${e}`);
+    }
+    console.log(`\n${data.count}/${data.requested} shots  center: ${data.center.x},${data.center.y},${data.center.z}  radius: ${data.radius}  height: ${data.height}`);
+    return;
+  }
+  if (command === "blueprint") {
+    // list
+    if (data.blueprints !== undefined) {
+      if (data.count === 0) { console.log("(no blueprints)"); return; }
+      for (const b of data.blueprints) {
+        console.log(`  ${b.name.padEnd(20)} ${String(b.blockCount).padStart(4)} blocks  origin: ${b.origin.x} ${b.origin.y} ${b.origin.z}  ${b.source || ""}  ${b.createdAt.slice(0, 10)}`);
+      }
+      console.log(`\n${data.count} blueprint(s)`);
+      return;
+    }
+    // show
+    if (data.materials !== undefined) {
+      console.log(`blueprint: ${data.name}  (${data.blockCount} blocks)`);
+      console.log(`  origin: ${data.origin.x} ${data.origin.y} ${data.origin.z}`);
+      console.log(`  created: ${data.createdAt}  source: ${data.source || "?"}`);
+      console.log("  materials:");
+      for (const [name, count] of Object.entries(data.materials)) console.log(`    ${name}: ${count}`);
+      return;
+    }
+    // snap
+    if (data.status === "saved") {
+      console.log(`saved "${data.name}" (${data.blockCount} blocks, volume ${data.volume})`);
+      return;
+    }
+    // diff
+    if (data.progress !== undefined) {
+      console.log(`${data.name || "blueprint"}: ${data.progress}  (missing: ${data.missing}, wrong: ${data.wrong})`);
+      if (data.next?.length > 0) {
+        console.log("  next placements:");
+        for (const n of data.next.slice(0, 10)) {
+          console.log(`    ${n.expected} at ${n.x} ${n.y} ${n.z} ${n.hasSupport ? "(supported)" : "(unsupported)"} ${n.dist}m`);
+        }
+      }
+      if (data.wrongBlocks?.length > 0) {
+        console.log("  wrong blocks:");
+        for (const w of data.wrongBlocks.slice(0, 5)) {
+          console.log(`    ${w.x} ${w.y} ${w.z}: expected ${w.expected}, got ${w.actual}`);
+        }
+      }
+      return;
+    }
+    // delete
+    if (data.status === "deleted") {
+      console.log(`deleted blueprint "${data.name}"`);
+      return;
+    }
+    console.log(JSON.stringify(data, null, 2));
     return;
   }
   const msg = data.status || data.message || JSON.stringify(data);

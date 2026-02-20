@@ -35,3 +35,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # Minecraft server data (world, jars, libraries, plugins, cache)
 data/
+
+# Chunky runtime downloads
+chunky/*
+!chunky/setup.sh

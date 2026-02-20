@@ -11,6 +11,7 @@ const Vec3 = require("vec3").Vec3;
 import { ActionQueue } from "./lib/action-queue";
 import { type ExecuteContext } from "./lib/executor";
 import { acquireLock, releaseLock, getLocks, isLocked } from "./lib/locks";
+import { writeServerInfo, removeServerInfo } from "./lib/server-lifecycle";
 import { runGoto, type GotoOptions } from "./lib/navigation";
 import { addMemory, readAllMemories } from "./lib/memories";
 import {
@@ -91,7 +92,7 @@ function summarizeResult(command: string, data: any): string {
   if (command === "place") return data.placed ? `placed ${data.block}` : `failed: ${data.error}`;
   if (command === "kill" || command === "killall") return data.status;
   if (command === "list") return `${data.bots?.length || 0} bots`;
-  if (command === "pov" || command === "render") return data.file || "";
+  if (command === "render") return data.file || "";
   return data.status || data.message || "";
 }
 
@@ -100,23 +101,23 @@ const connecting = new Set<string>(); // bots currently connecting
 const lastCommandAt = new Map<string, number>(); // track last command time per bot
 const PORT = Number(process.env.MCBOT_API_PORT) || 3847;
 
-const PROFILES_DIR = join(import.meta.dirname, "profiles");
-const TEMPLATE_DIR = join(PROFILES_DIR, "_template");
+const AGENTS_DIR = join(import.meta.dirname, "agents");
+const TEMPLATE_DIR = join(AGENTS_DIR, "_template");
 
 
-function ensureProfile(name: string) {
-  const profileDir = join(PROFILES_DIR, name);
-  if (existsSync(profileDir)) return;
+function ensureAgent(name: string) {
+  const agentDir = join(AGENTS_DIR, name);
+  if (existsSync(agentDir)) return;
   if (!existsSync(TEMPLATE_DIR)) return;
-  mkdirSync(profileDir, { recursive: true });
-  mkdirSync(join(profileDir, "memories"), { recursive: true });
+  mkdirSync(agentDir, { recursive: true });
+  mkdirSync(join(agentDir, "memories"), { recursive: true });
   const soulTemplate = readFileSync(join(TEMPLATE_DIR, "SOUL.md"), "utf-8");
-  writeFileSync(join(profileDir, "SOUL.md"), soulTemplate.replace(/\{\{NAME\}\}/g, name));
-  const configTemplate = join(TEMPLATE_DIR, "profile.config.ts");
+  writeFileSync(join(agentDir, "SOUL.md"), soulTemplate.replace(/\{\{NAME\}\}/g, name));
+  const configTemplate = join(TEMPLATE_DIR, "agent.config.ts");
   if (existsSync(configTemplate)) {
-    writeFileSync(join(profileDir, "profile.config.ts"), readFileSync(configTemplate, "utf-8"));
+    writeFileSync(join(agentDir, "agent.config.ts"), readFileSync(configTemplate, "utf-8"));
   }
-  console.log(`[mcbot] Created profile: ${profileDir}`);
+  console.log(`[mcbot] Created agent: ${agentDir}`);
 }
 
 const server = createServer(async (req, res) => {
@@ -224,6 +225,7 @@ const server = createServer(async (req, res) => {
 server.timeout = 255_000;
 server.listen(PORT, () => {
   console.log(`[mcbot] API server on http://localhost:${PORT}`);
+  writeServerInfo({ pid: process.pid, port: PORT, startedAt: new Date().toISOString(), logFile: "/tmp/mcbot-server.log" });
 });
 
 // Catch unhandled errors so socket/stream crashes don't kill the server
@@ -237,6 +239,22 @@ process.on("uncaughtException", (err) => {
   process.exit(1);
 });
 
+// Graceful shutdown — disconnect bots, close server, clean PID file
+function gracefulShutdown(signal: string) {
+  console.log(`\n[mcbot] ${signal} received, shutting down...`);
+  for (const [name, inst] of bots) {
+    try { inst.bot.quit(); } catch {}
+    console.log(`[mcbot] Disconnected "${name}"`);
+  }
+  bots.clear();
+  server.close();
+  removeServerInfo();
+  process.exit(0);
+}
+
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+
 // --- Meta commands ---
 
 async function spawnBot(name: string, params: any): Promise<any> {
@@ -247,6 +265,7 @@ async function spawnBot(name: string, params: any): Promise<any> {
     port: Number(params.port) || Number(process.env.MC_PORT) || 25565,
     username: name,
     version: params.version || "1.21.11",
+    worldPath: params.worldPath || process.env.MC_WORLD_PATH || "",
   };
 
   // Preflight: verify MC server is reachable before attempting mineflayer connect
@@ -281,7 +300,7 @@ async function spawnBot(name: string, params: any): Promise<any> {
       movements.allowSprinting = true;
       movements.maxDropDown = 4;
       movements.scafoldingBlocks = [mcData.blocksByName.dirt?.id, mcData.blocksByName.cobblestone?.id, mcData.blocksByName.oak_planks?.id].filter(Boolean);
-      bot.pathfinder.thinkTimeout = 10000;    // 10s for complex terrain
+      bot.pathfinder.thinkTimeout = 5000;     // 5s max — if path isn't found by then, give up and try another approach
       bot.pathfinder.tickTimeout = 40;         // max compute per tick (leave 10ms headroom)
       bot.pathfinder.searchRadius = 256;       // cap search to avoid 10s hangs on unreachable goals
       bot.pathfinder.enablePathShortcut = false;
@@ -295,6 +314,7 @@ async function spawnBot(name: string, params: any): Promise<any> {
         return _origGoto(goal);
       };
 
+      const agentDir = join(AGENTS_DIR, name);
       const buildContext = (signal: AbortSignal): ExecuteContext => ({
         bot, mcData, pathfinder, Vec3,
         GoalNear, GoalFollow: pathfinder.goals.GoalFollow, GoalBlock: pathfinder.goals.GoalBlock,
@@ -303,9 +323,21 @@ async function spawnBot(name: string, params: any): Promise<any> {
         log: () => {},
         goto: (x: number, y: number, z: number, opts?: GotoOptions, logFn?: (...a: any[]) => void, sigOverride?: AbortSignal) =>
           runGoto({ bot, Vec3, GoalNear }, { x, y, z }, opts, { signal: sigOverride || signal, log: logFn }),
+        agentDir,
       });
       const actionQueue = new ActionQueue(buildContext);
-      const instance: BotInstance = { bot, mcData, name, host: opts.host, port: opts.port, version: bot.version, chatInbox: [], directives: [], actionQueue };
+      const instance: BotInstance = {
+        bot,
+        mcData,
+        name,
+        host: opts.host,
+        port: opts.port,
+        version: bot.version,
+        worldPath: opts.worldPath || undefined,
+        chatInbox: [],
+        directives: [],
+        actionQueue,
+      };
       bots.set(name, instance);
 
       bot.on("chat", (username: string, message: string) => {
@@ -314,6 +346,28 @@ async function spawnBot(name: string, params: any): Promise<any> {
         instance.chatInbox.push({ sender: username, message, ts: new Date().toISOString() });
         if (instance.chatInbox.length > 100) instance.chatInbox.shift();
 
+        // Detect if sender is a real player (not one of our managed bots)
+        const isBot = bots.has(username);
+        const mentionPattern = new RegExp(`@${name}\\b`, "i");
+        const isMention = mentionPattern.test(message) || /@everyone\b/i.test(message);
+
+        if (isMention || !isBot) {
+          // Real player chat or @mention → create directive so agent responds
+          const directive = {
+            text: isMention
+              ? `[CHAT] @${name} from <${username}>: ${message} — YOU MUST reply via chat immediately.`
+              : `[CHAT] <${username}>: ${message} — Reply via bot.chat() if appropriate.`,
+            ts: new Date().toISOString(),
+            interrupt: isMention, // only interrupt current action for direct @mentions
+          };
+          instance.directives.push(directive);
+          if (instance.directives.length > 50) instance.directives.shift();
+          if (isMention) {
+            // Interrupt current action so agent sees the directive on next state poll
+            bot.pathfinder.stop();
+            bot.stopDigging?.();
+          }
+        }
       });
 
       // Keep bot knockback native-like by letting server velocity move it before resuming path input.
@@ -331,7 +385,7 @@ async function spawnBot(name: string, params: any): Promise<any> {
         if (packet?.entityId === bot.entity?.id) applyKnockbackWindow(350);
       });
 
-      try { ensureProfile(name); } catch {}
+      try { ensureAgent(name); } catch {}
       console.log(`[mcbot] Spawned "${name}" on ${opts.host}:${opts.port} (${bot.version})`);
       resolve({ status: "spawned", name, ...posOf(bot) });
     });
@@ -465,25 +519,25 @@ async function runFleetCommand(spec: CommandSpec, params: Record<string, string>
   if (spec.name === "profile") {
     const name = params.name;
     if (!name) throw new Error("need name param");
-    const profileDir = join(PROFILES_DIR, name);
-    const soulPath = join(profileDir, "SOUL.md");
+    const agentDir = join(AGENTS_DIR, name);
+    const soulPath = join(agentDir, "SOUL.md");
 
     if (params.init === "true") {
-      if (existsSync(profileDir)) throw new Error(`profile already exists: ${profileDir}`);
-      ensureProfile(name);
-      return { status: "created", path: profileDir };
+      if (existsSync(agentDir)) throw new Error(`agent already exists: ${agentDir}`);
+      ensureAgent(name);
+      return { status: "created", path: agentDir };
     }
 
     if (params.memory) {
-      if (!existsSync(profileDir)) throw new Error(`no profile for "${name}". create with --init`);
-      const total = addMemory(profileDir, params.memory);
+      if (!existsSync(agentDir)) throw new Error(`no agent for "${name}". create with --init`);
+      const total = addMemory(agentDir, params.memory);
       return { status: "memory added", total };
     }
 
-    if (!existsSync(profileDir)) return { exists: false, name };
+    if (!existsSync(agentDir)) return { exists: false, name };
     const result: any = { exists: true, name };
     if (existsSync(soulPath)) result.soul = readFileSync(soulPath, "utf-8");
-    const memories = readAllMemories(profileDir);
+    const memories = readAllMemories(agentDir);
     if (memories) result.memories = memories;
     return result;
   }

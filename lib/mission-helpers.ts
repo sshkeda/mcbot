@@ -6,6 +6,10 @@
  * Every loop checks signal.aborted for cancellation support.
  */
 
+import * as blueprintStore from "./blueprint-store";
+import type { BlueprintEntry, BlueprintData } from "./blueprint-store";
+import { takeSnapshot } from "./snapshot-core";
+
 export interface MissionDeps {
   bot: any;
   mcData: any;
@@ -15,6 +19,7 @@ export interface MissionDeps {
   signal: AbortSignal;
   log: (...args: any[]) => void;
   goto?: (...args: any[]) => Promise<any>;
+  agentDir?: string;
 }
 
 export interface MissionResult {
@@ -34,12 +39,18 @@ export interface MissionHelpers {
   ensureTool: (toolType: string, minTier?: string) => Promise<MissionResult>;
   progress: (msg: string) => void;
   checkpoint: (label: string, data?: any) => void;
+  scanArea: (x1: number, y1: number, z1: number, x2: number, y2: number, z2: number) => MissionResult;
+  loadBlueprint: (name: string) => MissionResult;
+  saveBlueprint: (name: string, origin: { x: number; y: number; z: number }, blocks: BlueprintEntry[]) => MissionResult;
+  diffBlueprint: (nameOrData: string | { origin: any; blueprint: BlueprintEntry[] }) => MissionResult;
+  buildFromBlueprint: (name: string, opts?: { maxBlocks?: number; skipWrong?: boolean; gatherMissing?: boolean }) => Promise<MissionResult>;
+  snapshot: (nameOrBounds: string | { x1: number; y1: number; z1: number; x2: number; y2: number; z2: number; blueprint?: string; maxLayers?: number }) => MissionResult;
 }
 
 const TOOL_TIERS = ["netherite", "diamond", "iron", "golden", "stone", "wooden"] as const;
 
 export function buildMissionHelpers(deps: MissionDeps): MissionHelpers {
-  const { bot, mcData, Vec3, GoalNear, sleep, signal, log, goto } = deps;
+  const { bot, mcData, Vec3, GoalNear, sleep, signal, log, goto, agentDir } = deps;
 
   // ── Reporting ────────────────────────────────────────────────
 
@@ -231,11 +242,13 @@ export function buildMissionHelpers(deps: MissionDeps): MissionHelpers {
 
       if (attempt >= maxRetries) break;
 
-      // Recovery: dig forward block + sprint-jump
+      // Recovery: dig toward target + sprint-jump
       try {
         progress(`Navigation stuck, recovery #${attempt + 1}`);
         const p = bot.entity.position;
-        const yaw = bot.entity.yaw;
+        // Face toward the target, not wherever the bot is currently looking
+        const yaw = Math.atan2(-(x - p.x), -(z - p.z));
+        await bot.look(yaw, 0);
         const frontX = Math.floor(p.x - Math.sin(yaw));
         const frontZ = Math.floor(p.z - Math.cos(yaw));
         for (let dy = 0; dy <= 1; dy++) {
@@ -546,6 +559,233 @@ export function buildMissionHelpers(deps: MissionDeps): MissionHelpers {
     return { x: Math.round(p.x * 10) / 10, y: Math.round(p.y * 10) / 10, z: Math.round(p.z * 10) / 10 };
   }
 
+  // ── scanArea ─────────────────────────────────────────────────
+  // Reports unloaded chunks as `unknown` so remote scans don't misreport as all-air.
+
+  function scanArea(x1: number, y1: number, z1: number, x2: number, y2: number, z2: number): MissionResult {
+    const minX = Math.min(x1, x2), maxX = Math.max(x1, x2);
+    const minY = Math.min(y1, y2), maxY = Math.max(y1, y2);
+    const minZ = Math.min(z1, z2), maxZ = Math.max(z1, z2);
+    const vol = (maxX - minX + 1) * (maxY - minY + 1) * (maxZ - minZ + 1);
+    if (vol > 10_000) return { ok: false, error: `volume too large: ${vol} blocks (max 10000)` };
+
+    const blocks: { x: number; y: number; z: number; name: string }[] = [];
+    const counts: Record<string, number> = {};
+    let air = 0;
+    let unknown = 0;
+    for (let y = minY; y <= maxY; y++) {
+      for (let z = minZ; z <= maxZ; z++) {
+        for (let x = minX; x <= maxX; x++) {
+          const block = bot.blockAt(new Vec3(x, y, z));
+          // `blockAt` returns null in unloaded chunks; treat as unknown, not air.
+          if (!block) { unknown++; continue; }
+          if (block.name === "air" || block.name === "cave_air") { air++; continue; }
+          blocks.push({ x, y, z, name: block.name });
+          counts[block.name] = (counts[block.name] || 0) + 1;
+        }
+      }
+    }
+    return {
+      ok: true,
+      from: { x: minX, y: minY, z: minZ },
+      to: { x: maxX, y: maxY, z: maxZ },
+      volume: vol,
+      filled: blocks.length,
+      air,
+      unknown,
+      complete: unknown === 0,
+      counts, blocks,
+    };
+  }
+
+  // ── loadBlueprint ──────────────────────────────────────────
+
+  function loadBlueprintHelper(name: string): MissionResult {
+    if (!agentDir) return { ok: false, error: "no agent directory configured" };
+    const data = blueprintStore.loadBlueprint(agentDir,name);
+    if (!data) return { ok: false, error: `blueprint "${name}" not found` };
+    return { ok: true, ...data };
+  }
+
+  // ── saveBlueprint ──────────────────────────────────────────
+
+  function saveBlueprintHelper(
+    name: string,
+    origin: { x: number; y: number; z: number },
+    blocks: BlueprintEntry[],
+  ): MissionResult {
+    if (!agentDir) return { ok: false, error: "no agent directory configured" };
+    if (!blocks || !Array.isArray(blocks) || blocks.length === 0)
+      return { ok: false, error: "blocks array is empty" };
+    const data: BlueprintData = {
+      name, origin, blocks,
+      createdAt: new Date().toISOString(),
+      source: "manual",
+    };
+    try {
+      blueprintStore.saveBlueprint(agentDir, data);
+      return { ok: true, name, blockCount: blocks.length };
+    } catch (e: any) {
+      return { ok: false, error: `save failed: ${e.message}` };
+    }
+  }
+
+  // ── diffBlueprint ──────────────────────────────────────────
+
+  function diffBlueprintHelper(nameOrData: string | { origin: any; blueprint: BlueprintEntry[] }): MissionResult {
+    let origin: { x: number; y: number; z: number };
+    let blocks: BlueprintEntry[];
+
+    if (typeof nameOrData === "string") {
+      if (!agentDir) return { ok: false, error: "no agent directory configured" };
+      const data = blueprintStore.loadBlueprint(agentDir,nameOrData);
+      if (!data) return { ok: false, error: `blueprint "${nameOrData}" not found` };
+      origin = data.origin;
+      blocks = data.blocks;
+    } else {
+      origin = nameOrData.origin;
+      blocks = nameOrData.blueprint;
+    }
+
+    if (!origin || !blocks) return { ok: false, error: "invalid blueprint data" };
+
+    const result = blueprintStore.diffBlueprintBlocks(bot, Vec3, origin, blocks, 50);
+    return { ok: true, ...result };
+  }
+
+  // ── buildFromBlueprint ─────────────────────────────────────
+
+  async function buildFromBlueprintHelper(
+    name: string,
+    opts?: { maxBlocks?: number; skipWrong?: boolean; gatherMissing?: boolean },
+  ): Promise<MissionResult> {
+    if (!agentDir) return { ok: false, error: "no agent directory configured" };
+    const bpData = blueprintStore.loadBlueprint(agentDir,name);
+    if (!bpData) return { ok: false, error: `blueprint "${name}" not found` };
+
+    const maxBlocks = opts?.maxBlocks ?? Infinity;
+    const gatherMissing = opts?.gatherMissing ?? false;
+
+    let placedCount = 0;
+    let skipped = 0;
+    let failed = 0;
+    const iterLimit = maxBlocks === Infinity ? 5000 : maxBlocks * 3;
+
+    for (let iteration = 0; iteration < iterLimit; iteration++) {
+      if (signal.aborted) break;
+      if (placedCount >= maxBlocks) break;
+
+      // Re-diff to get fresh candidates
+      const diff = blueprintStore.diffBlueprintBlocks(bot, Vec3, bpData.origin, bpData.blocks, 50);
+      if (diff.missing === 0) {
+        progress(`Build complete: ${diff.progress}`);
+        return {
+          ok: true, placed: placedCount, skipped, failed,
+          missing: 0, wrong: diff.wrong, progress: diff.progress,
+        };
+      }
+
+      const candidates = diff.next;
+      if (!candidates || candidates.length === 0) {
+        return {
+          ok: placedCount > 0, placed: placedCount, skipped, failed,
+          missing: diff.missing, wrong: diff.wrong, progress: diff.progress,
+          error: placedCount > 0 ? undefined : "no placeable candidates (all missing blocks lack support below)",
+        };
+      }
+
+      const target = candidates[0]!;
+
+      // Check inventory for the needed block
+      let haveItem = bot.inventory.items().find((i: any) => i.name === target.expected);
+      if (!haveItem) {
+        if (gatherMissing) {
+          progress(`Need ${target.expected}, gathering...`);
+          const gatherResult = await gatherResource(target.expected, Math.min(16, diff.missing), { radius: 64 });
+          if (!gatherResult.ok && gatherResult.gathered === 0) {
+            skipped++;
+            continue;
+          }
+          haveItem = bot.inventory.items().find((i: any) => i.name === target.expected);
+          if (!haveItem) { skipped++; continue; }
+        } else {
+          skipped++;
+          continue;
+        }
+      }
+
+      // Navigate
+      const nav = await navigateSafe(target.x, target.y, target.z, { range: 4 });
+      if (!nav.ok) {
+        log(`buildFromBlueprint: can't reach ${target.x},${target.y},${target.z}: ${nav.error}`);
+        failed++;
+        continue;
+      }
+
+      // Place the block
+      try {
+        const item = bot.inventory.items().find((i: any) => i.name === target.expected);
+        if (!item) { skipped++; continue; }
+        await bot.equip(item, "hand");
+
+        const targetPos = new Vec3(target.x, target.y, target.z);
+        const offsets = [[0, -1, 0], [0, 1, 0], [1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]];
+        let didPlace = false;
+        for (const [dx, dy, dz] of offsets) {
+          const refBlock = bot.blockAt(targetPos.offset(dx, dy, dz));
+          if (refBlock && refBlock.boundingBox === "block") {
+            try {
+              await bot.placeBlock(refBlock, new Vec3(-dx!, -dy!, -dz!));
+              didPlace = true;
+              break;
+            } catch { continue; }
+          }
+        }
+
+        if (didPlace) {
+          placedCount++;
+          if (placedCount % 5 === 0 || placedCount >= maxBlocks) {
+            const freshDiff = blueprintStore.diffBlueprintBlocks(bot, Vec3, bpData.origin, bpData.blocks);
+            progress(`Building "${name}": placed ${placedCount}, ${freshDiff.progress}`);
+          }
+        } else {
+          failed++;
+          log(`buildFromBlueprint: no reference face at ${target.x},${target.y},${target.z}`);
+        }
+      } catch (e: any) {
+        failed++;
+        log(`buildFromBlueprint: place error at ${target.x},${target.y},${target.z}: ${e.message}`);
+      }
+    }
+
+    const finalDiff = blueprintStore.diffBlueprintBlocks(bot, Vec3, bpData.origin, bpData.blocks);
+    return {
+      ok: placedCount > 0,
+      placed: placedCount, skipped, failed,
+      missing: finalDiff.missing, wrong: finalDiff.wrong, progress: finalDiff.progress,
+    };
+  }
+
+  // ── snapshot ──────────────────────────────────────────────────
+
+  function snapshotHelper(
+    nameOrBounds: string | { x1: number; y1: number; z1: number; x2: number; y2: number; z2: number; blueprint?: string; maxLayers?: number },
+  ): MissionResult {
+    let bounds: { x1: number; y1: number; z1: number; x2: number; y2: number; z2: number } | null = null;
+    let opts: { blueprint?: string; maxLayers?: number } = {};
+
+    if (typeof nameOrBounds === "string") {
+      // Treat as blueprint name
+      opts.blueprint = nameOrBounds;
+    } else {
+      bounds = { x1: nameOrBounds.x1, y1: nameOrBounds.y1, z1: nameOrBounds.z1, x2: nameOrBounds.x2, y2: nameOrBounds.y2, z2: nameOrBounds.z2 };
+      if (nameOrBounds.blueprint) opts.blueprint = nameOrBounds.blueprint;
+      if (nameOrBounds.maxLayers !== undefined) opts.maxLayers = nameOrBounds.maxLayers;
+    }
+
+    return takeSnapshot(bot, Vec3, bounds, agentDir, opts);
+  }
+
   // ── Export ───────────────────────────────────────────────────
 
   return {
@@ -559,5 +799,11 @@ export function buildMissionHelpers(deps: MissionDeps): MissionHelpers {
     ensureTool,
     progress,
     checkpoint,
+    scanArea,
+    loadBlueprint: loadBlueprintHelper,
+    saveBlueprint: saveBlueprintHelper,
+    diffBlueprint: diffBlueprintHelper,
+    buildFromBlueprint: buildFromBlueprintHelper,
+    snapshot: snapshotHelper,
   };
 }

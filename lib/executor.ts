@@ -21,6 +21,8 @@ export interface ExecuteContext {
   log: (...args: any[]) => void;
   /** Shared navigation engine — injected by buildContext, wrapped by executor to capture logs. */
   goto?: (...args: any[]) => Promise<any>;
+  /** Agent directory for this bot — needed by blueprint helpers. */
+  agentDir?: string;
   // Mission helpers (optional — injected after context wrapping)
   checkCraftability?: (items: string[]) => any;
   navigateSafe?: (x: number, y: number, z: number, opts?: any) => Promise<MissionResult>;
@@ -32,6 +34,12 @@ export interface ExecuteContext {
   ensureTool?: (toolType: string, minTier?: string) => Promise<MissionResult>;
   progress?: (msg: string) => void;
   checkpoint?: (label: string, data?: any) => void;
+  // Blueprint helpers
+  scanArea?: (x1: number, y1: number, z1: number, x2: number, y2: number, z2: number) => any;
+  loadBlueprint?: (name: string) => any;
+  saveBlueprint?: (name: string, origin: any, blocks: any[]) => any;
+  diffBlueprint?: (nameOrData: string | any) => any;
+  buildFromBlueprint?: (name: string, opts?: any) => Promise<any>;
 }
 
 export interface ExecuteResult {
@@ -144,6 +152,7 @@ export async function executeCode(
     signal: localCtx.signal,
     log: localCtx.log,
     goto: localCtx.goto,
+    agentDir: localCtx.agentDir,
   });
   Object.assign(localCtx, helpers);
 

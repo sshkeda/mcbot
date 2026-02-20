@@ -96,6 +96,10 @@ export async function runGoto(
   const tz = Number(target.z);
   const legs: LegTelemetry[] = [];
   let manualAttempts = 0;
+  let consecutiveStalls = 0;
+  let lastHDist = Infinity;          // track horizontal progress toward target
+  let noProgressLegs = 0;            // legs with no meaningful horizontal progress
+  const goalNearRange = Math.max(Math.floor(range), 1);
 
   while (!signal?.aborted) {
     const pos = bot.entity.position.clone();
@@ -148,17 +152,48 @@ export async function runGoto(
           reject(new Error("timeout"));
         }, legTimeoutMs);
 
-        bot.pathfinder.goto(new GoalNear(goalX, goalY, goalZ, 3)).then(
+        bot.pathfinder.goto(new GoalNear(goalX, goalY, goalZ, goalNearRange)).then(
           () => { if (!settled) { settled = true; clearTimeout(timer); resolve(); } },
           (e: any) => { if (!settled) { settled = true; clearTimeout(timer); reject(e); } },
         );
       });
       const ms = Date.now() - t0;
+      const to = posOf(bot.entity.position);
       legs.push({
         index: legs.length, ok: true, ms, from,
-        to: posOf(bot.entity.position),
+        to,
         goal: { x: goalX, y: goalY, z: goalZ },
       });
+
+      // ── Stall detection ──
+      // 1) Absolute movement check (original)
+      const moved = Math.abs(to.x - from.x) + Math.abs(to.y - from.y) + Math.abs(to.z - from.z);
+      if (moved < 0.5) {
+        consecutiveStalls++;
+        if (consecutiveStalls >= 3) {
+          log(`stalled ${consecutiveStalls} legs — triggering manual fallback`);
+          consecutiveStalls = 0;
+          throw new Error("stalled — no movement over 3 legs");
+        }
+      } else {
+        consecutiveStalls = 0;
+      }
+
+      // 2) Horizontal progress check: detect circling/oscillating near target
+      const curHDist = Math.sqrt((tx - to.x) ** 2 + (tz - to.z) ** 2);
+      if (curHDist < lastHDist - 0.3) {
+        // Making real progress toward target
+        noProgressLegs = 0;
+      } else {
+        noProgressLegs++;
+      }
+      lastHDist = curHDist;
+      if (noProgressLegs >= 5) {
+        log(`no horizontal progress for ${noProgressLegs} legs (h=${curHDist.toFixed(1)}) — triggering fallback`);
+        noProgressLegs = 0;
+        throw new Error("no horizontal progress — stuck oscillating");
+      }
+
       manualAttempts = 0;
       log(`leg OK ${ms}ms`);
     } catch (err: any) {

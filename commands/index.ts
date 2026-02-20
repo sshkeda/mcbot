@@ -24,12 +24,14 @@ import inbox from "./inbox";
 import direct from "./direct";
 import directives from "./directives";
 import give from "./give";
-import pov from "./pov";
 import render from "./render";
 import probe from "./probe";
 import scan_volume from "./scan_volume";
 import diff_blueprint from "./diff_blueprint";
+import blueprint from "./blueprint";
 import progress from "./progress";
+import snapshot from "./snapshot";
+import orbit from "./orbit";
 
 export const handlers: Record<string, (instance: BotInstance, params: any) => Promise<any>> = {
   look, inventory, block, recipes,
@@ -37,6 +39,7 @@ export const handlers: Record<string, (instance: BotInstance, params: any) => Pr
   skills, load_skill, save_skill,
   place, goto, follow, stop, chat, attack, dig, drop, equip,
   survey, inbox, direct, directives, give,
-  pov, render,
-  probe, scan_volume, diff_blueprint,
+  render,
+  probe, scan_volume, diff_blueprint, blueprint,
+  snapshot, orbit,
 };

@@ -253,8 +253,26 @@ const BOT_COMMANDS: CommandSpec[] = [
     scope: "bot",
     family: "world.observe",
     tool: "world.observe.diff_blueprint",
-    usage: "diff_blueprint (POST: {origin: {x,y,z}, blueprint: [{dx,dy,dz,block},...]})",
-    summary: "Compare a blueprint against world state. Returns missing/wrong/placed + next placement candidates",
+    usage: "diff_blueprint [--name NAME] (POST: {origin, blueprint} or {name})",
+    summary: "Compare a blueprint against world state. Accepts saved name or inline JSON",
+  },
+  {
+    name: "blueprint",
+    scope: "bot",
+    family: "world.observe",
+    tool: "world.observe.blueprint",
+    usage: "blueprint [list|show|snap|diff|delete] [<name>] [<x1> <y1> <z1> <x2> <y2> <z2>]",
+    summary: "Manage saved blueprints (list, show, snap area, diff vs world, delete)",
+    parsePositional: (positional, params) => {
+      if (positional[0]) params.action = positional[0];
+      if (positional[1]) params.name = positional[1];
+      if (positional[2]) params.x1 = positional[2];
+      if (positional[3]) params.y1 = positional[3];
+      if (positional[4]) params.z1 = positional[4];
+      if (positional[5]) params.x2 = positional[5];
+      if (positional[6]) params.y2 = positional[6];
+      if (positional[7]) params.z2 = positional[7];
+    },
   },
   {
     name: "recipes",
@@ -500,20 +518,66 @@ const BOT_COMMANDS: CommandSpec[] = [
     },
   },
   {
-    name: "pov",
-    scope: "bot",
-    family: "world.observe",
-    tool: "world.observe.pov",
-    usage: "pov [--distance N] [--scale N]",
-    summary: "First-person view PNG",
-  },
-  {
     name: "render",
     scope: "bot",
     family: "world.observe",
     tool: "world.observe.render",
-    usage: "render [--viewDistance N] [--wait N]",
-    summary: "Native 3D render (Node 22 only)",
+    usage: "render [--camera x,y,z] [--lookAt x,y,z] [--fov N] [--spp N] [--world PATH] [--inspect true|false]",
+    summary: "Native 3D render. Chunky inspect mode is default for build review clarity",
+    validate: (params) => {
+      if (params.spp != null && (isNaN(Number(params.spp)) || Number(params.spp) <= 0)) {
+        return "--spp must be a positive number";
+      }
+      return null;
+    },
+  },
+  {
+    name: "snapshot",
+    scope: "bot",
+    family: "world.observe",
+    tool: "world.observe.snapshot",
+    usage: "snapshot <x1> <y1> <z1> <x2> <y2> <z2> [--blueprint NAME] [--maxLayers N]  OR  snapshot --blueprint NAME",
+    summary: "Structural scan with ASCII layer maps + optional blueprint diff",
+    parsePositional: (positional, params) => {
+      if (positional[0]) params.x1 = positional[0];
+      if (positional[1]) params.y1 = positional[1];
+      if (positional[2]) params.z1 = positional[2];
+      if (positional[3]) params.x2 = positional[3];
+      if (positional[4]) params.y2 = positional[4];
+      if (positional[5]) params.z2 = positional[5];
+    },
+    validate: (params) => {
+      const coordFields = [params.x1, params.y1, params.z1, params.x2, params.y2, params.z2];
+      const hasAnyCoord = coordFields.some(f => f != null && f !== "");
+      const hasAllCoords = coordFields.every(f => f != null && f !== "" && !isNaN(Number(f)));
+      if (hasAnyCoord && !hasAllCoords) return "partial coordinates: need all of x1 y1 z1 x2 y2 z2";
+      if (!hasAllCoords && !params.blueprint) return "need x1 y1 z1 x2 y2 z2 or --blueprint NAME";
+      return null;
+    },
+  },
+  {
+    name: "orbit",
+    scope: "bot",
+    family: "world.observe",
+    tool: "world.observe.orbit",
+    usage: "orbit [<cx> <cy> <cz>] [--radius 15] [--height 5] [--count 4] [--spp N] [--world PATH] [--inspect true|false]  OR  orbit --blueprint NAME",
+    summary: "Take screenshots around a center point (defaults to bot position)",
+    parsePositional: (positional, params) => {
+      if (positional[0]) params.cx = positional[0];
+      if (positional[1]) params.cy = positional[1];
+      if (positional[2]) params.cz = positional[2];
+    },
+    validate: (params) => {
+      if (params.spp != null && (isNaN(Number(params.spp)) || Number(params.spp) <= 0)) {
+        return "--spp must be a positive number";
+      }
+      const coordFields = [params.cx, params.cy, params.cz];
+      const hasAnyCoord = coordFields.some(f => f != null && f !== "");
+      const hasAllCoords = coordFields.every(f => f != null && f !== "" && !isNaN(Number(f)));
+      if (hasAnyCoord && !hasAllCoords) return "partial coordinates: need all of cx cy cz";
+      // No explicit center is valid: orbit command falls back to bot position.
+      return null;
+    },
   },
   {
     name: "tool",

@@ -6,24 +6,24 @@ function today(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
-/** Return the memories/ directory for a bot profile. */
-export function memoriesDir(profileDir: string): string {
-  return join(profileDir, "memories");
+/** Return the memories/ directory for a bot agent. */
+export function memoriesDir(agentDir: string): string {
+  return join(agentDir, "memories");
 }
 
 /** Append a memory line to today's daily file. */
-export function addMemory(profileDir: string, text: string): number {
-  const dir = memoriesDir(profileDir);
+export function addMemory(agentDir: string, text: string): number {
+  const dir = memoriesDir(agentDir);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const file = join(dir, `${today()}.md`);
   appendFileSync(file, `- ${text}\n`);
   // Count total memories across all days
-  return countMemories(profileDir);
+  return countMemories(agentDir);
 }
 
 /** Count total memory lines across all daily files. */
-export function countMemories(profileDir: string): number {
-  const dir = memoriesDir(profileDir);
+export function countMemories(agentDir: string): number {
+  const dir = memoriesDir(agentDir);
   if (!existsSync(dir)) return 0;
   let total = 0;
   for (const f of readdirSync(dir).filter(f => f.endsWith(".md"))) {
@@ -34,8 +34,8 @@ export function countMemories(profileDir: string): number {
 }
 
 /** Read recent memories (last N days worth of daily files). Returns { date, lines }[]. */
-export function readRecentMemories(profileDir: string, maxDays = 7): { date: string; lines: string[] }[] {
-  const dir = memoriesDir(profileDir);
+export function readRecentMemories(agentDir: string, maxDays = 7): { date: string; lines: string[] }[] {
+  const dir = memoriesDir(agentDir);
   if (!existsSync(dir)) return [];
   const files = readdirSync(dir)
     .filter(f => f.endsWith(".md"))
@@ -49,8 +49,8 @@ export function readRecentMemories(profileDir: string, maxDays = 7): { date: str
 }
 
 /** Read ALL memories across all days, flat list. */
-export function readAllMemories(profileDir: string): string {
-  const dir = memoriesDir(profileDir);
+export function readAllMemories(agentDir: string): string {
+  const dir = memoriesDir(agentDir);
   if (!existsSync(dir)) return "";
   const files = readdirSync(dir)
     .filter(f => f.endsWith(".md"))

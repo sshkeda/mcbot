@@ -1,7 +1,7 @@
 import type { BotInstance } from "./_helpers";
 import { Vec3 } from "./_helpers";
 
-/** Scan a rectangular volume and return a sparse block list (non-air only). */
+/** Scan a rectangular volume, returning non-air blocks plus `air` and `unknown` counts. */
 export default async function (instance: BotInstance, params: any) {
   const { bot } = instance;
   const x1 = Number(params.x1), y1 = Number(params.y1), z1 = Number(params.z1);
@@ -18,15 +18,19 @@ export default async function (instance: BotInstance, params: any) {
 
   const blocks: { x: number; y: number; z: number; name: string }[] = [];
   const counts: Record<string, number> = {};
+  let air = 0;
+  let unknown = 0;
 
   for (let y = minY; y <= maxY; y++) {
     for (let z = minZ; z <= maxZ; z++) {
       for (let x = minX; x <= maxX; x++) {
         const block = bot.blockAt(new Vec3(x, y, z));
-        if (block && block.name !== "air" && block.name !== "cave_air") {
-          blocks.push({ x, y, z, name: block.name });
-          counts[block.name] = (counts[block.name] || 0) + 1;
-        }
+        // `blockAt` returns null when the chunk is not loaded.
+        // Keep that separate from real air so scan results stay truthful.
+        if (!block) { unknown++; continue; }
+        if (block.name === "air" || block.name === "cave_air") { air++; continue; }
+        blocks.push({ x, y, z, name: block.name });
+        counts[block.name] = (counts[block.name] || 0) + 1;
       }
     }
   }
@@ -36,7 +40,9 @@ export default async function (instance: BotInstance, params: any) {
     to: { x: maxX, y: maxY, z: maxZ },
     volume: vol,
     filled: blocks.length,
-    air: vol - blocks.length,
+    air,
+    unknown,
+    complete: unknown === 0,
     counts,
     blocks,
   };

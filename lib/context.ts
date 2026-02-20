@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { getCommands } from "./commands";
 import { readRecentMemories, countMemories } from "./memories";
 
-export async function runContext(api: string, profilesDir: string, name: string, goal: string): Promise<void> {
+export async function runContext(api: string, agentsDir: string, name: string, goal: string): Promise<void> {
   const [stateRes, invRes, listRes] = await Promise.all([
     fetch(`${api}/${name}/state`).then(r => r.json()).catch(() => null) as Promise<any>,
     fetch(`${api}/${name}/inventory`).then(r => r.json()).catch(() => null) as Promise<any>,
@@ -14,16 +14,16 @@ export async function runContext(api: string, profilesDir: string, name: string,
   const cmdList = botCommands.map(c => `  bun run cli.ts ${name} ${c.usage.padEnd(50)} ${c.summary}`).join("\n");
 
   let profileBlock = "";
-  const profileDir = join(profilesDir, name);
-  const soulPath = join(profileDir, "SOUL.md");
+  const agentDir = join(agentsDir, name);
+  const soulPath = join(agentDir, "SOUL.md");
 
   if (existsSync(soulPath)) {
     const soul = readFileSync(soulPath, "utf-8").trim();
     if (soul) profileBlock += `\n\n## Personality & Identity\n${soul}`;
   }
 
-  const total = countMemories(profileDir);
-  const recent = readRecentMemories(profileDir, 7);
+  const total = countMemories(agentDir);
+  const recent = readRecentMemories(agentDir, 7);
   if (recent.length > 0) {
     const memLines: string[] = [];
     for (const day of recent) {
@@ -72,7 +72,7 @@ ${cmdList}
 
 ## Rules
 - \`state\` is your primary command — it blocks up to 5s, returns early when an action finishes, and gives you everything: position, health, biome, collision, completed actions, inbox, directives, movements config.
-- After running pov or render, use the Read tool to view the returned PNG file path.
+- After running render or orbit, use the Read tool to view the returned PNG file path.
 - If a command fails, read the error and try a different approach. Never retry the same command blindly.
 - When done with the goal, report what you accomplished.
 - **Batch commands** — run \`state\` + \`inventory\` + \`look\` in parallel. Never waste a turn on a single observation.
@@ -96,8 +96,8 @@ Watch for: "not found", "disconnected", "server not running", or commands hangin
 - Use **TaskUpdate** to mark \`in_progress\` / \`completed\`.
 
 ## Identity & Memory
-- **\`profiles/${name}/SOUL.md\`** — Your personality and role. Rewrite it to reflect who you've become.
-- **\`profiles/${name}/memories/${today}.md\`** — Today's memory log. Append \`- text\` bullets when you discover locations, learn something, or complete goals.
+- **\`agents/${name}/SOUL.md\`** — Your personality and role. Rewrite it to reflect who you've become.
+- **\`agents/${name}/memories/${today}.md\`** — Today's memory log. Append \`- text\` bullets when you discover locations, learn something, or complete goals.
 
 Use the **Edit** tool to update these files naturally as things happen.`;
 

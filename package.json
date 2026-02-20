@@ -7,7 +7,7 @@
     "mcbot": "cli.ts"
   },
   "scripts": {
-    "server": "bun run server.ts",
+    "server": "bun run cli.ts serve",
     "server:node": "npx tsx server.ts",
     "cli": "bun run cli.ts"
   },

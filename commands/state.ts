@@ -12,10 +12,9 @@ export default async function (instance: BotInstance, params: any) {
   const current = instance.actionQueue.getCurrent();
   const completed = instance.actionQueue.getCompletedSince(params.since || null);
   const pending = instance.actionQueue.getState().filter((a: any) => a.status === "pending").length;
-  const messages = [...instance.chatInbox];
-  instance.chatInbox.length = 0;
+  // Show inline but never drain — use `inbox` / `directives` commands to drain.
+  const inbox = [...instance.chatInbox];
   const directives = [...instance.directives];
-  instance.directives.length = 0;
 
   return {
     ts: new Date().toISOString(),
@@ -37,7 +36,7 @@ export default async function (instance: BotInstance, params: any) {
     currentAction: current ? { id: current.id, name: current.name, status: current.status, startedAt: current.startedAt } : null,
     queueLength: pending,
     completed,
-    inbox: messages,
+    inbox,
     directives,
     ...(bot.pathfinder?.movements ? {
       movements: {

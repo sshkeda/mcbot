@@ -192,13 +192,34 @@ export class ActionQueue {
         const next = this.queue.find((a) => a.status === "pending");
         if (!next) break;
 
+        // Skip if cancelled between finding and starting (defensive)
+        if (next.status !== "pending") continue;
+
         next.status = "running";
         next.startedAt = new Date().toISOString();
         const ac = new AbortController();
         next._ac = ac;
 
-        const ctx = this.buildContext(ac.signal);
-        const result: ExecuteResult = await executeCode(next.code, ctx, next.timeoutMs);
+        let result: ExecuteResult;
+        try {
+          const ctx = this.buildContext(ac.signal);
+          // Safety timeout: if executeCode hangs past its timeout (e.g. mineflayer
+          // promise never resolves after abort), force-resolve so the queue doesn't
+          // deadlock with processing=true forever.
+          const safetyMs = next.timeoutMs + 10_000;
+          result = await Promise.race([
+            executeCode(next.code, ctx, next.timeoutMs),
+            new Promise<ExecuteResult>((resolve) =>
+              setTimeout(() => {
+                if (!ac.signal.aborted) ac.abort();
+                resolve({ success: false, error: "queue safety timeout — executeCode hung", logs: [], result: undefined });
+              }, safetyMs),
+            ),
+          ]);
+        } catch (e: any) {
+          // executeCode should never throw, but guard against it
+          result = { success: false, error: `processLoop caught: ${e.message}`, logs: [], result: undefined };
+        }
 
         // Abort lingering async code from timed-out/failed actions
         if (!ac.signal.aborted) ac.abort();
@@ -232,7 +253,10 @@ export class ActionQueue {
       // restart the loop (avoids race where push() saw processing=true
       // but the loop was about to exit).
       const hasPending = this.queue.some((a) => a.status === "pending");
-      if (hasPending) this.processLoop();
+      if (hasPending) {
+        // Use queueMicrotask to avoid deep recursive stacks
+        queueMicrotask(() => this.processLoop().catch(() => {}));
+      }
     }
   }
 }
