@@ -6,6 +6,8 @@
  * sleep, output capture, and configurable timeout.
  */
 
+import { buildMissionHelpers, type MissionResult } from "./mission-helpers";
+
 export interface ExecuteContext {
   bot: any;
   mcData: any;
@@ -19,6 +21,17 @@ export interface ExecuteContext {
   log: (...args: any[]) => void;
   /** Shared navigation engine — injected by buildContext, wrapped by executor to capture logs. */
   goto?: (...args: any[]) => Promise<any>;
+  // Mission helpers (optional — injected after context wrapping)
+  checkCraftability?: (items: string[]) => any;
+  navigateSafe?: (x: number, y: number, z: number, opts?: any) => Promise<MissionResult>;
+  gatherResource?: (name: string, count: number, opts?: any) => Promise<MissionResult>;
+  craftItem?: (name: string, count: number, opts?: any) => Promise<MissionResult>;
+  mineOre?: (name: string, count: number, opts?: any) => Promise<MissionResult>;
+  collectDrops?: (radius?: number) => Promise<MissionResult>;
+  equipBest?: (category: string) => Promise<MissionResult>;
+  ensureTool?: (toolType: string, minTier?: string) => Promise<MissionResult>;
+  progress?: (msg: string) => void;
+  checkpoint?: (label: string, data?: any) => void;
 }
 
 export interface ExecuteResult {
@@ -91,19 +104,6 @@ export async function executeCode(
       _baseGoto(x, y, z, opts, logFn);
   }
 
-  let fn: (...args: any[]) => Promise<any>;
-  try {
-    fn = new AsyncFunction(...Object.keys(execCtx), code);
-  } catch (err: any) {
-    return {
-      success: false,
-      result: null,
-      logs,
-      error: `syntax error: ${err.message}`,
-      durationMs: 0,
-    };
-  }
-
   // Create a local AbortController that chains the parent signal.
   // This lets us abort on timeout (the parent AC may not be ours to abort).
   const localAc = new AbortController();
@@ -131,6 +131,35 @@ export async function executeCode(
     const _baseGoto = ctx.goto;
     localCtx.goto = (x: number, y: number, z: number, opts?: any) =>
       _baseGoto(x, y, z, opts, logFn, localAc.signal);
+  }
+
+  // Inject mission helpers — built here so they close over the abort-aware
+  // sleep, log-capturing logFn, and the local signal.
+  const helpers = buildMissionHelpers({
+    bot: localCtx.bot,
+    mcData: localCtx.mcData,
+    Vec3: localCtx.Vec3,
+    GoalNear: localCtx.GoalNear,
+    sleep: localCtx.sleep,
+    signal: localCtx.signal,
+    log: localCtx.log,
+    goto: localCtx.goto,
+  });
+  Object.assign(localCtx, helpers);
+
+  // Create AsyncFunction AFTER helpers are injected so all keys become
+  // named parameters in the generated function.
+  let fn: (...args: any[]) => Promise<any>;
+  try {
+    fn = new AsyncFunction(...Object.keys(localCtx), code);
+  } catch (err: any) {
+    return {
+      success: false,
+      result: null,
+      logs,
+      error: `syntax error: ${err.message}`,
+      durationMs: 0,
+    };
   }
 
   const localParamValues = Object.values(localCtx);

@@ -60,11 +60,6 @@ export function formatOutput(command: string, data: any): void {
     formatOutput(data.command, data.result);
     return;
   }
-  if (command === "status") {
-    const { position: p, health, food, time, biome } = data;
-    console.log(`pos: ${p.x} ${p.y} ${p.z}  hp: ${health}  food: ${food}  ${time}  ${biome}`);
-    return;
-  }
   if (command === "inventory") {
     if (data.length === 0) {
       console.log("(empty)");
@@ -213,8 +208,22 @@ export function formatOutput(command: string, data: any): void {
         }
       }
     }
-    if (entities.players.length > 0) console.log(`  players: ${entities.players.join(", ")}`);
-    console.log(`  hostiles: ${entities.hostiles}  animals: ${entities.animals}`);
+    if (entities.players?.length > 0) {
+      for (const pl of entities.players) console.log(`  player: ${pl.name} at ${pl.position.x} ${pl.position.y} ${pl.position.z} (${pl.distance}m)`);
+    }
+    if (entities.hostiles?.count > 0) {
+      console.log(`  hostiles: ${entities.hostiles.count}`);
+      for (const h of entities.hostiles.nearest) console.log(`    ${h.name} at ${h.position.x} ${h.position.y} ${h.position.z} (${h.distance}m)`);
+    }
+    if (entities.animals?.count > 0) {
+      console.log(`  animals: ${entities.animals.count}`);
+      for (const a of entities.animals.nearest) console.log(`    ${a.name} at ${a.position.x} ${a.position.y} ${a.position.z} (${a.distance}m)`);
+    }
+    if (entities.items?.count > 0) {
+      console.log(`  items on ground: ${entities.items.count}`);
+      for (const it of entities.items.nearest) console.log(`    ${it.name} x${it.count} at ${it.position.x} ${it.position.y} ${it.position.z} (${it.distance}m)`);
+    }
+    if (data.chunks) console.log(`  chunks: ${data.chunks.loaded}/${data.chunks.total} loaded (${Math.round(data.chunks.fraction * 100)}%)`);
     return;
   }
   if (command === "camera") {

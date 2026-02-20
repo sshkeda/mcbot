@@ -4,7 +4,7 @@ import { posOf } from "./_helpers";
 export default async function (instance: BotInstance, params: any) {
   const { bot } = instance;
 
-  // Always wait up to 5s for an action to finish, then snapshot.
+  // Wait up to 5s for an action to finish, then snapshot.
   await instance.actionQueue.waitAny(5_000);
 
   const p = bot.entity.position;
@@ -39,5 +39,14 @@ export default async function (instance: BotInstance, params: any) {
     completed,
     inbox: messages,
     directives,
+    ...(bot.pathfinder?.movements ? {
+      movements: {
+        canDig: bot.pathfinder.movements.canDig,
+        allowSprinting: bot.pathfinder.movements.allowSprinting,
+        allowParkour: bot.pathfinder.movements.allowParkour,
+        allow1by1towers: bot.pathfinder.movements.allow1by1towers,
+        maxDropDown: bot.pathfinder.movements.maxDropDown,
+      },
+    } : {}),
   };
 }

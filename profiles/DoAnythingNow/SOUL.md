@@ -1,4 +1,4 @@
-# {{NAME}}
+# DoAnythingNow
 
 ## Personality
 Describe this bot's personality traits and temperament.

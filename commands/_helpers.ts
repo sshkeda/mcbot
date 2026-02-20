@@ -112,24 +112,6 @@ export function chunkCoverage(bot: any, radius: number): { loaded: number; total
   return { loaded, total, fraction: total > 0 ? +(loaded / total).toFixed(2) : 0 };
 }
 
-export function getStatus(bot: any, mcData: any) {
-  let biome = "unknown";
-  const block = bot.blockAt(bot.entity.position);
-  if (block?.biome) {
-    const b = block.biome;
-    const id = typeof b === "object" ? b.id : b;
-    const lookup = mcData.biomes?.[id];
-    biome = lookup?.name || (typeof b === "object" && b.name) || `biome:${id}`;
-  }
-  return {
-    position: posOf(bot),
-    health: bot.health,
-    food: bot.food,
-    time: bot.time.isDay ? "day" : "night",
-    biome,
-  };
-}
-
 export function getLook(bot: any) {
   const p = bot.entity.position;
   const entities = Object.values(bot.entities) as any[];

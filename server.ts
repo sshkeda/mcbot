@@ -100,8 +100,9 @@ const connecting = new Set<string>(); // bots currently connecting
 const lastCommandAt = new Map<string, number>(); // track last command time per bot
 const PORT = Number(process.env.MCBOT_API_PORT) || 3847;
 
-const PROFILES_DIR = join(import.meta.dirname, "mcbots");
+const PROFILES_DIR = join(import.meta.dirname, "profiles");
 const TEMPLATE_DIR = join(PROFILES_DIR, "_template");
+
 
 function ensureProfile(name: string) {
   const profileDir = join(PROFILES_DIR, name);
@@ -111,6 +112,10 @@ function ensureProfile(name: string) {
   mkdirSync(join(profileDir, "memories"), { recursive: true });
   const soulTemplate = readFileSync(join(TEMPLATE_DIR, "SOUL.md"), "utf-8");
   writeFileSync(join(profileDir, "SOUL.md"), soulTemplate.replace(/\{\{NAME\}\}/g, name));
+  const configTemplate = join(TEMPLATE_DIR, "profile.config.ts");
+  if (existsSync(configTemplate)) {
+    writeFileSync(join(profileDir, "profile.config.ts"), readFileSync(configTemplate, "utf-8"));
+  }
   console.log(`[mcbot] Created profile: ${profileDir}`);
 }
 
@@ -238,8 +243,8 @@ async function spawnBot(name: string, params: any): Promise<any> {
   if (bots.has(name) || connecting.has(name)) throw new Error(`bot "${name}" already exists`);
 
   const opts = {
-    host: params.host || "localhost",
-    port: Number(params.port) || 25565,
+    host: params.host || process.env.MC_HOST || "localhost",
+    port: Number(params.port) || Number(process.env.MC_PORT) || 25565,
     username: name,
     version: params.version || "1.21.11",
   };
@@ -277,8 +282,9 @@ async function spawnBot(name: string, params: any): Promise<any> {
       movements.maxDropDown = 4;
       movements.scafoldingBlocks = [mcData.blocksByName.dirt?.id, mcData.blocksByName.cobblestone?.id, mcData.blocksByName.oak_planks?.id].filter(Boolean);
       bot.pathfinder.thinkTimeout = 10000;    // 10s for complex terrain
-      bot.pathfinder.tickTimeout = 50;         // max compute per tick
-      bot.pathfinder.enablePathShortcut = true; // skip unnecessary waypoints
+      bot.pathfinder.tickTimeout = 40;         // max compute per tick (leave 10ms headroom)
+      bot.pathfinder.searchRadius = 256;       // cap search to avoid 10s hangs on unreachable goals
+      bot.pathfinder.enablePathShortcut = false;
       bot.pathfinder.setMovements(movements);
 
       // Wrap goto to handle mineflayer-pathfinder's stopPathing closure flag.
@@ -307,6 +313,7 @@ async function spawnBot(name: string, params: any): Promise<any> {
         if (!username || username === "" || message.startsWith("[Server]")) return; // ignore server messages
         instance.chatInbox.push({ sender: username, message, ts: new Date().toISOString() });
         if (instance.chatInbox.length > 100) instance.chatInbox.shift();
+
       });
 
       // Keep bot knockback native-like by letting server velocity move it before resuming path input.

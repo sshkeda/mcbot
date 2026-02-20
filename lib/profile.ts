@@ -25,6 +25,10 @@ export function runProfile(profilesDir: string, params: Record<string, string>):
     if (existsSync(todoTemplatePath)) {
       writeFileSync(join(profileDir, "TODO.md"), readFileSync(todoTemplatePath, "utf-8"));
     }
+    const configTemplatePath = join(templateDir, "profile.config.ts");
+    if (existsSync(configTemplatePath)) {
+      writeFileSync(join(profileDir, "profile.config.ts"), readFileSync(configTemplatePath, "utf-8"));
+    }
     console.log(`created profile: ${profileDir}`);
     process.exit(0);
   }

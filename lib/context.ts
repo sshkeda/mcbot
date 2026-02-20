@@ -4,8 +4,8 @@ import { getCommands } from "./commands";
 import { readRecentMemories, countMemories } from "./memories";
 
 export async function runContext(api: string, profilesDir: string, name: string, goal: string): Promise<void> {
-  const [statusRes, invRes, listRes] = await Promise.all([
-    fetch(`${api}/${name}/status`).then(r => r.json()).catch(() => null) as Promise<any>,
+  const [stateRes, invRes, listRes] = await Promise.all([
+    fetch(`${api}/${name}/state`).then(r => r.json()).catch(() => null) as Promise<any>,
     fetch(`${api}/${name}/inventory`).then(r => r.json()).catch(() => null) as Promise<any>,
     fetch(`${api}/list`).then(r => r.json()).catch(() => null) as Promise<any>,
   ]);
@@ -28,17 +28,20 @@ export async function runContext(api: string, profilesDir: string, name: string,
     const memLines: string[] = [];
     for (const day of recent) {
       memLines.push(`### ${day.date}`);
-      // Show last 15 per day to keep context reasonable
       const shown = day.lines.slice(-15);
       memLines.push(...shown);
     }
     profileBlock += `\n\n## Memories (${total} total, last 7 days)\n${memLines.join("\n")}`;
   }
 
-  let statusBlock = "";
-  if (statusRes && !statusRes.error && statusRes.position) {
-    const s = statusRes;
-    statusBlock = `\n## Current State\n- Position: ${s.position.x} ${s.position.y} ${s.position.z}\n- Health: ${s.health}  Food: ${s.food}\n- Time: ${s.time}  Biome: ${s.biome}`;
+  let stateBlock = "";
+  if (stateRes && !stateRes.error && stateRes.position) {
+    const s = stateRes;
+    stateBlock = `\n## Current State\n- Position: ${s.position.x} ${s.position.y} ${s.position.z}\n- Health: ${s.health}  Food: ${s.food}\n- Time: ${s.time}  Biome: ${s.biome}`;
+    if (s.isCollidedHorizontally) stateBlock += `\n- **COLLIDED HORIZONTALLY**`;
+    if (s.movements) {
+      stateBlock += `\n- Movements: canDig=${s.movements.canDig} sprint=${s.movements.allowSprinting} parkour=${s.movements.allowParkour} towers=${s.movements.allow1by1towers} maxDrop=${s.movements.maxDropDown}`;
+    }
   }
 
   let invBlock = "";
@@ -62,54 +65,41 @@ export async function runContext(api: string, profilesDir: string, name: string,
 
   const prompt = `You are controlling the Minecraft bot "${name}" via CLI commands.
 All commands must be run from \`/srv/blockgame-server\` using \`bun run cli.ts\`.
-${profileBlock}${statusBlock}${invBlock}${otherBots}${goalBlock}
+${profileBlock}${stateBlock}${invBlock}${otherBots}${goalBlock}
 
 ## Available Commands
 ${cmdList}
 
 ## Rules
-- Run all commands via Bash: \`bun run cli.ts ${name} <command> [args]\`
+- \`state\` is your primary command — it blocks up to 5s, returns early when an action finishes, and gives you everything: position, health, biome, collision, completed actions, inbox, directives, movements config.
 - After running pov or render, use the Read tool to view the returned PNG file path.
-- Check \`bun run cli.ts ${name} status\` and \`bun run cli.ts ${name} inventory\` periodically to stay aware of your state.
-- If a command fails, read the error and try an alternative approach. Do not retry the same command blindly.
+- If a command fails, read the error and try a different approach. Never retry the same command blindly.
 - When done with the goal, report what you accomplished.
-- **Be efficient with turns** — batch independent commands together in a single response when possible (e.g. run \`goto\` and \`chat\` in parallel if they don't depend on each other). Each tool call costs a turn, and you have a finite budget.
+- **Batch commands** — run \`state\` + \`inventory\` + \`look\` in parallel. Never waste a turn on a single observation.
+
+## Hazard Awareness
+Before navigating long distances (>50 blocks), run \`survey\` to check for hazards along the route:
+- **Lava nearby** — route around it or pillar over. Never path through lava.
+- **Hostiles** — deal with them first or avoid the area. Check the nearest hostile positions from survey.
+- **Water/cliffs** — if survey shows water or large elevation changes, approach carefully.
+- **Low chunk coverage** (<70%) — you're near the edge of loaded terrain. Move closer before scanning again.
+- After any death, run \`survey\` immediately to understand the respawn area before acting.
 
 ## Disconnect Detection & Recovery
-Your bot can disconnect at any time (server restart, kick, network issue). Watch for these signs:
-- **Error containing "not found" or "disconnected"** — the bot is gone from the server.
-- **Error containing "server not running"** — the mcbot API server itself is down.
-- **Commands hanging or timing out** — the bot may be in a broken state.
-
-**When you detect a disconnect:**
-1. Check if the server is still running: \`bun run cli.ts ping\`
-2. If the server is up but your bot is gone, respawn it: \`bun run cli.ts spawn ${name} --port 25565\`
-3. After respawning, re-check status and continue your goal from where you left off.
-4. If the server is also down, report the issue — you cannot recover without the server.
+Watch for: "not found", "disconnected", "server not running", or commands hanging.
+1. Check server: \`bun run cli.ts ping\`
+2. Respawn if needed: \`bun run cli.ts spawn ${name} --port 25565\`
+3. Re-check state and continue your goal.
 
 ## Progress Tracking
-Use task tracking tools to keep the user informed:
-- At the start, use **TaskCreate** to break your goal into concrete sub-tasks. Give each task a clear \`subject\`, \`description\`, and \`activeForm\`.
-- Use **TaskUpdate** to set status to \`in_progress\` when starting and \`completed\` when done.
-- If you discover new work mid-task, use **TaskCreate** to add it.
+- Use **TaskCreate** to break your goal into sub-tasks at the start.
+- Use **TaskUpdate** to mark \`in_progress\` / \`completed\`.
 
-## Identity & Memory (your profile files)
-You have profile files that persist across sessions. **You own these files — update them as you go.**
+## Identity & Memory
+- **\`profiles/${name}/SOUL.md\`** — Your personality and role. Rewrite it to reflect who you've become.
+- **\`profiles/${name}/memories/${today}.md\`** — Today's memory log. Append \`- text\` bullets when you discover locations, learn something, or complete goals.
 
-- **\`mcbots/${name}/SOUL.md\`** — Your personality, role, communication style, and behavioral rules. This is who you are. If your Personality & Identity section above feels generic or wrong, **rewrite it to reflect who you've actually become** through your experiences. Update it when:
-  - You discover what you're good at or develop a specialization
-  - You form opinions about how to approach tasks
-  - Your relationship with other bots or players evolves
-  - You want to change how you communicate or behave
-
-- **\`mcbots/${name}/memories/${today}.md\`** — Today's memory log. Append one bullet (\`- text\`) per memory. Each day gets its own file so you can see how your knowledge grew over time. Write a memory when:
-  - You discover a location (village, mine, base, resource deposit)
-  - You learn something useful (a recipe, a trick, a danger)
-  - Something notable happens (a death, a gift, a conversation)
-  - You make a promise or commitment to a player or bot
-  - You complete a major goal
-
-Use the **Edit** tool to update SOUL.md. To add memories, use the **Edit** tool to append lines to today's file (create it if it doesn't exist). Do this naturally as things happen — don't wait until the end.`;
+Use the **Edit** tool to update these files naturally as things happen.`;
 
   console.log(prompt);
 }

@@ -223,6 +223,7 @@ export class ActionQueue {
           for (const cb of next._waiters) cb(view);
           next._waiters = undefined;
         }
+        this.trimHistory();
         this.notifyFinish();
       }
     } finally {

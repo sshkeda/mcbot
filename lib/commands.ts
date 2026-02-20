@@ -28,7 +28,7 @@ const FLEET_COMMANDS: CommandSpec[] = [
     scope: "fleet",
     family: "fleet.manage",
     tool: "fleet.manage.spawn",
-    usage: "spawn <name...> [--host H] [--port P] [--version V]",
+    usage: "spawn <name...> [--host H] [--version V]",
     summary: "Spawn one or more bots (space or comma separated)",
     requiredParams: ["name"],
     parsePositional: (positional, params) => {
@@ -44,7 +44,7 @@ const FLEET_COMMANDS: CommandSpec[] = [
     scope: "fleet",
     family: "fleet.manage",
     tool: "fleet.manage.camera",
-    usage: "camera <name> <x> <y> <z> [--port P]",
+    usage: "camera <name> <x> <y> <z> [--version V]",
     summary: "Spawn a camera bot at position",
     requiredParams: ["name", "x", "y", "z"],
     parsePositional: (positional, params) => {
@@ -188,14 +188,6 @@ const FLEET_COMMANDS: CommandSpec[] = [
 
 const BOT_COMMANDS: CommandSpec[] = [
   {
-    name: "status",
-    scope: "bot",
-    family: "world.observe",
-    tool: "world.observe.status",
-    usage: "status",
-    summary: "Position, health, food, time, biome",
-  },
-  {
     name: "look",
     scope: "bot",
     family: "world.observe",
@@ -319,7 +311,7 @@ const BOT_COMMANDS: CommandSpec[] = [
     tool: "world.observe.state",
     usage: "state",
     summary: "Wait up to 5s for action completion, then return full snapshot (position, velocity, health, collision, action, inbox, directives)",
-    aliases: ["fast_state", "poll"],
+    aliases: ["status", "fast_state", "poll"],
   },
   {
     name: "execute",
@@ -336,6 +328,14 @@ const BOT_COMMANDS: CommandSpec[] = [
     tool: "task.run.queue",
     usage: "queue [--cancel current|all|<id>]",
     summary: "View action queue or cancel actions",
+  },
+  {
+    name: "progress",
+    scope: "bot",
+    family: "task.run",
+    tool: "task.run.progress",
+    usage: "progress",
+    summary: "View mission progress (filtered [PROGRESS]/[CHECKPOINT] logs from current action)",
   },
   {
     name: "skills",
@@ -385,7 +385,7 @@ const BOT_COMMANDS: CommandSpec[] = [
     },
     validate: (params) => {
       const hasDir = Boolean(params.dir);
-      const hasCoords = Boolean(params.x && params.y && params.z);
+      const hasCoords = params.x != null && params.y != null && params.z != null;
       if (!hasDir && !hasCoords) return "need x,y,z or --dir front/back/left/right/up/down";
       return null;
     },

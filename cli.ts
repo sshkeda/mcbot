@@ -12,7 +12,7 @@ import { runProfile } from "./lib/profile";
 import { runContext } from "./lib/context";
 
 const API = `http://localhost:${process.env.MCBOT_API_PORT || 3847}`;
-const PROFILES_DIR = join(import.meta.dirname, "mcbots");
+const PROFILES_DIR = join(import.meta.dirname, "profiles");
 const DEFAULT_BOT = process.env.MCBOT_NAME || "";
 const allArgs = process.argv.slice(2);
 
