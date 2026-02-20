@@ -1,0 +1,30 @@
+{
+  "name": "mine-bot",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "mcbot": "cli.ts"
+  },
+  "scripts": {
+    "server": "bun run server.ts",
+    "server:node": "npx tsx server.ts",
+    "cli": "bun run cli.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "tsx": "^4"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "canvas": "^3.0.0-rc3",
+    "gl": "^8.1.6",
+    "mineflayer": "^4.35.0",
+    "mineflayer-pathfinder": "^2.4.5",
+    "node-canvas-webgl": "^2.0.1",
+    "prismarine-viewer": "^1.33.0",
+    "sharp": "^0.34.5"
+  }
+}
